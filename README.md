@@ -6,8 +6,11 @@ Offline Zetamac-style arithmetic practice that records how long every question t
 
 Double-click `index.html` (or drag it into a browser window). Everything runs from the file. No internet connection is needed.
 
-- **Practice**: pick Standard or Targeted ×, a difficulty (Easy / Medium / Hard / Custom ranges), a duration (Bullet 60 s, Blitz 120 s, Rapid 180 s) and operations. Press **Enter** or **Start**.
+- **Practice**: pick Standard or Targeted practice, a difficulty, operations and a duration (Bullet 1 min, Blitz 2 min, Rapid 3 min). Press **Enter** or **Start**.
+- **Operations** are chosen separately for Standard and Targeted practice, so changing one doesn't change the other.
+- **Ranges** sit inline next to each operation. Choosing Easy, Medium or Hard fills them in. Editing any number switches to Custom and keeps the other values. Choosing Custom again later brings back your last custom ranges.
 - During a round, type answers. A correct answer advances immediately, with no Enter needed. **Esc** abandons the round.
+- **Play again** on the results screen (or Enter) starts another round with the same settings.
 - **Statistics** has history, score trends, per-operation timing, multiplication pair/number analysis, a heatmap, and data controls.
 
 Your last-used settings are remembered.
@@ -59,16 +62,28 @@ Export now and then. Browser storage can be wiped by the browser or by clearing 
 - **Heatmap.** Rows are the smaller factor and columns the larger. Colour shows median time, using quantile bins. Hatched cells have fewer than 5 samples, and dashed empty cells have no data.
 - **Division.** You can optionally include division as divisor × quotient.
 
-### Targeted × mode
+### Targeted practice
 
-There are three focuses: **My slowest pairs**, **Numbers** (e.g. `7, 8` × a partner range), and **Pairs** (e.g. `7x8, 6x9`). A configurable share of questions (0–50 %, default 25 %) is random multiplication from the current ranges, so practice doesn't collapse onto a few facts.
+Targeted practice works with any mix of addition, subtraction, multiplication and division. Choose the operations with the same checkboxes as in Standard mode. A configurable share of questions (0–50 %, default 25 %) is random from the current ranges, so practice doesn't collapse onto a few problems.
 
-"Slowest pairs" works like this:
+There are three focuses:
 
-- It takes up to 15 of your slowest sufficiently sampled pairs inside the current ranges.
-- It picks each one with probability proportional to its median time squared.
-- It avoids immediate repeats and randomises factor order.
-- With fewer than 3 qualifying pairs, it falls back to random multiplication and tells you so.
+- **My slowest problems** uses your timing history from completed rounds, both standard and targeted.
+- **Numbers** (e.g. `7, 8` with a partner range) builds questions from those numbers with every selected operation: 7 + p, (7 + p) − 7, 7 × p, (7 × p) ÷ 7, in either order.
+- **Operand pairs** (e.g. `7x8, 47+38`) works the same way: 7x8 gives 7 + 8, 15 − 7, 7 × 8 and 56 ÷ 7.
+
+"My slowest problems" works like this:
+
+- Each question picks one of the selected operations evenly.
+- For that operation, it draws from up to 15 of your slowest problems that fit the current ranges.
+- A problem qualifies in one of two ways:
+  - It has **at least 5 completed answers**. It is then scored by its median time, the same rule as the pair ranking.
+  - It was **left unfinished when time ran out**, after you had already spent longer on it than your typical (median) time for that operation. It is then scored by that time, capped at 3× your typical time.
+- 7 + 8 and 8 + 7 count as the same problem, as do 7 × 8 and 8 × 7. 15 − 7 and 15 − 8 are different problems, and so are 56 ÷ 7 and 56 ÷ 8.
+- A problem's chance is proportional to its score squared. The same problem is never shown twice in a row.
+- An operation with fewer than 3 qualifying problems gets random questions, and the setup screen says which operations those are. If no selected operation has enough history, the whole round is random practice.
+
+Targeted rounds keep their own history and personal bests, separate from standard rounds. Targeted rounds saved before this change (multiplication only) still compare with new multiplication-only targeted rounds.
 
 ## Tests
 
@@ -82,7 +97,7 @@ Unit tests (Node ≥ 18) cover the following:
 - Answer checking, timing, the deadline, and single-save behaviour
 - Unfinished questions
 - Statistics, pair grouping and number counting
-- Targeted weighting and fallback
+- Targeted problem grouping, unfinished candidates, weighting and per-operation fallback
 - Storage round-trip, backup validation and duplicate detection
 
 ```bash
@@ -97,7 +112,7 @@ This end-to-end test (about 75 s, needs Google Chrome) runs headless Chrome agai
 - Abandoning a round
 - Quitting and relaunching Chrome to confirm persistence
 - Export, clear, import, and re-import duplicate skipping
-- Targeted mode
+- Targeted practice: separate operation choices per mode, numbers across + and ×, and slowest-problem rounds drawn from seeded history (including an unfinished problem)
 - The save-failure warning
 - Checking that no network requests were made
 

@@ -109,12 +109,8 @@
     s.mode = f.querySelector('input[name=mode]:checked').value;
     s.difficulty = f.querySelector('input[name=difficulty]:checked').value;
     s.duration = Number(f.querySelector('input[name=duration]:checked').value);
-    Z.OPS.forEach((o) => { s.ops[o] = f.querySelector(`input[name=op][value=${o}]`).checked; });
-    $$('[data-range]').forEach((inp) => {
-      const [k, i, j] = inp.dataset.range.split('.');
-      const v = inp.value.trim() === '' ? NaN : Number(inp.value);
-      s.custom[k][i][j] = v;
-    });
+    const ops = activeOps();
+    Z.OPS.forEach((o) => { ops[o] = f.querySelector(`input[name=op][value=${o}]`).checked; });
     s.targeted.focus = f.querySelector('input[name=focus]:checked').value;
     s.targeted.numbers = $('#t-numbers').value;
     s.targeted.pairs = $('#t-pairs').value;
@@ -129,11 +125,8 @@
     f.querySelector(`input[name=mode][value=${s.mode}]`).checked = true;
     f.querySelector(`input[name=difficulty][value=${s.difficulty}]`).checked = true;
     f.querySelector(`input[name=duration][value="${s.duration}"]`).checked = true;
-    Z.OPS.forEach((o) => { f.querySelector(`input[name=op][value=${o}]`).checked = !!s.ops[o]; });
-    $$('[data-range]').forEach((inp) => {
-      const [k, i, j] = inp.dataset.range.split('.');
-      inp.value = s.custom[k][i][j];
-    });
+    fillOps();
+    fillRanges();
     f.querySelector(`input[name=focus][value=${s.targeted.focus}]`).checked = true;
     $('#t-numbers').value = s.targeted.numbers;
     $('#t-pairs').value = s.targeted.pairs;
@@ -142,50 +135,76 @@
     $('#t-random').value = s.targeted.randomPct;
   }
 
+  // Standard and targeted rounds keep separate operation choices.
+  function activeOps() {
+    const s = state.settings;
+    return s.mode === 'targeted' ? s.targeted.ops : s.ops;
+  }
+
+  function fillOps() {
+    const ops = activeOps();
+    Z.OPS.forEach((o) => { $(`input[name=op][value=${o}]`).checked = !!ops[o]; });
+  }
+
+  // Show the active ranges: the preset's values, or the saved custom ranges.
+  function fillRanges() {
+    const ranges = Z.rangesFor(state.settings);
+    $$('[data-range]').forEach((inp) => {
+      const [k, i, j] = inp.dataset.range.split('.');
+      const v = ranges[k][i][j];
+      inp.value = Number.isFinite(v) ? v : '';
+    });
+  }
+
+  // Editing any range switches to Custom, keeping every other displayed value.
+  function onRangeInput() {
+    const s = state.settings;
+    s.difficulty = 'custom';
+    $('input[name=difficulty][value=custom]').checked = true;
+    $$('[data-range]').forEach((inp) => {
+      const [k, i, j] = inp.dataset.range.split('.');
+      s.custom[k][i][j] = inp.value.trim() === '' ? NaN : Number(inp.value);
+    });
+    saveSettings();
+    renderSetup();
+  }
+
   // Returns { config } for a startable round or { error }.
   function buildRoundConfig() {
     const s = state.settings;
     const ranges = Z.rangesFor(s);
-    if (!Z.validRanges(ranges)) return { error: 'Each custom range needs whole numbers from 1 upward, with min ≤ max.' };
+    if (!Z.validRanges(ranges)) return { error: 'Each range needs whole numbers from 1 upward, with min ≤ max.' };
+    const ops = Z.enabledOps(activeOps());
+    if (!ops.length) return { error: 'Choose at least one operation.' };
     if (s.mode === 'standard') {
-      const ops = Z.enabledOps(s.ops);
-      if (!ops.length) return { error: 'Choose at least one operation.' };
       return { config: { mode: 'standard', difficulty: s.difficulty, ranges, ops, duration: s.duration } };
     }
     let target;
     try { target = Z.targetConfig(s.targeted); } catch (e) { return { error: e.message }; }
-    const plan = Z.buildTargetPlan(target, ranges.mul, historyObservations());
-    return { config: { mode: 'targeted', difficulty: s.difficulty, ranges, ops: ['mul'], duration: s.duration, target }, plan };
+    const plan = Z.buildTargetPlan(target, ranges, ops, historyQuestions());
+    return { config: { mode: 'targeted', difficulty: s.difficulty, ranges, ops, duration: s.duration, target }, plan };
   }
 
-  // Completed multiplications from completed rounds, used for slowest-pair targeting.
-  function historyObservations() {
+  // Every question (completed or unfinished) from completed rounds, standard and targeted.
+  function historyQuestions() {
     const qs = [];
     state.sessions.forEach((s) => { if (s.status === 'completed') qs.push(...s.questions); });
-    return Z.mulObservations(qs, false);
-  }
-
-  function rangeSummary(ranges, s) {
-    const r = Z.rangeLabel;
-    if (s.mode === 'targeted') {
-      return `Random multiplication questions use ${r(ranges.mul[0])} × ${r(ranges.mul[1])}.`;
-    }
-    const ops = Z.enabledOps(s.ops);
-    const parts = [];
-    if (ops.includes('add') || ops.includes('sub')) parts.push(`Addition (${r(ranges.add[0])}) + (${r(ranges.add[1])})`);
-    if (ops.includes('mul') || ops.includes('div')) parts.push(`multiplication (${r(ranges.mul[0])}) × (${r(ranges.mul[1])})`);
-    return parts.join('; ') + (parts.length ? '. Subtraction and division are the reverse problems.' : '');
+    return qs;
   }
 
   function renderSetup() {
     const s = state.settings;
-    $('#custom-ranges').hidden = s.difficulty !== 'custom';
-    $('#ops-field').hidden = s.mode === 'targeted';
-    $('#targeted-panel').hidden = s.mode !== 'targeted';
+    const targeted = s.mode === 'targeted';
+    $('#targeted-panel').hidden = !targeted;
     $$('[data-focus]').forEach((el) => { el.hidden = el.dataset.focus !== s.targeted.focus; });
-
-    const ranges = Z.rangesFor(s);
-    $('#range-summary').textContent = Z.validRanges(ranges) ? rangeSummary(ranges, s) : '';
+    const ops = activeOps();
+    // Subtraction uses the addition ranges and division the multiplication ranges.
+    const rangeUsed = { add: ops.add || ops.sub, mul: ops.mul || ops.div };
+    $$('.op-row').forEach((row) => {
+      const op = row.dataset.row;
+      row.classList.toggle('off', !ops[op]);
+      row.classList.toggle('range-off', op in rangeUsed && !rangeUsed[op]);
+    });
 
     const built = buildRoundConfig();
     $('#setup-error').textContent = built.error || '';
@@ -208,32 +227,39 @@
   function renderTargetInfo(built) {
     const t = state.settings.targeted;
     const pct = t.randomPct;
-    const main = 100 - pct;
-    let text = '';
+    const what = { slowest: 'your slowest problems', numbers: 'your numbers', pairs: 'your operand pairs' }[t.focus];
+    $('#target-explain').textContent = `${100 - pct}% of questions use ${what}, ${pct}% are random, across the operations below.`;
+    let detail;
     if (t.focus === 'slowest') {
-      text = `About ${main}% of questions come from your ${Z.SLOWEST_POOL_SIZE} slowest multiplication pairs ` +
-        `(ranked by median time, only pairs with at least ${Z.MIN_PAIR_SAMPLES} completed answers inside the current ranges). ` +
-        'A pair’s chance is proportional to its median time squared, so slower pairs come up more often. ' +
-        `The other ${pct}% are random multiplications from the current ranges. Factor order is randomised and the same pair is not shown twice in a row.`;
+      detail = `Each question first picks one of the selected operations evenly. For that operation, it draws from up to ${Z.SLOWEST_POOL_SIZE} ` +
+        `of your slowest problems within the ranges below. Candidates are problems with at least ${Z.MIN_PAIR_SAMPLES} completed answers (scored by median time) ` +
+        'and problems left unfinished when time ran out, if you had already spent longer on them than your typical time for that operation. ' +
+        'Unfinished times are capped at 3× your typical time. A problem\'s chance is proportional to its score squared. ' +
+        'An operation with fewer than 3 candidates gets random questions. 7 + 8 and 8 + 7 (or 7 × 8 and 8 × 7) count as one problem.';
     } else if (t.focus === 'numbers') {
-      text = `About ${main}% of questions multiply one of your numbers (chosen evenly) by a random partner from the range; ` +
-        `the other ${pct}% are random multiplications from the current ranges. Factor order is randomised.`;
+      detail = 'Each targeted question uses one of your numbers (chosen evenly) and a random partner from the range you set, ' +
+        'with the selected operation chosen evenly: n + p, (n + p) − n, n × p or (n × p) ÷ n, in either order.';
     } else {
-      text = `About ${main}% of questions are your pairs (chosen evenly, random factor order, no immediate repeats); ` +
-        `the other ${pct}% are random multiplications from the current ranges.`;
+      detail = 'Each pair is used with the selected operations: 7x8 gives 7 + 8, 15 − 7, 7 × 8 and 56 ÷ 7 (either order). Pairs are chosen evenly.';
     }
-    $('#target-explain').textContent = text;
+    $('#target-details').textContent = detail + ' The same problem is not shown twice in a row. ' +
+      'Targeted rounds have their own history and personal bests, separate from standard rounds.';
 
     const prev = $('#target-preview');
     if (!built.plan) { prev.innerHTML = ''; return; }
-    if (built.plan.fallback) {
-      prev.innerHTML = `<p class="error">${esc(built.plan.fallback)}</p>`;
-    } else if (built.plan.pool.length) {
-      prev.innerHTML = '<div>Current focus pairs (median, samples, share of targeted questions):</div>' +
-        built.plan.pool.map((p) => `<span class="chip">${p.lo}×${p.hi} · ${fmtS(p.median)} · n=${p.count} · ${Math.round(p.weight * 100)}%</span>`).join('');
-    } else {
-      prev.innerHTML = '';
+    let html = built.plan.fallback ? `<p class="notice">${esc(built.plan.fallback)}</p>` : '';
+    const pools = built.plan.pools || {};
+    const withPools = Z.OPS.filter((op) => pools[op] && pools[op].length);
+    if (withPools.length) {
+      html += '<div class="muted small">Current focus · score · samples · share within operation</div>';
+      withPools.forEach((op) => {
+        html += '<div class="pool-row">' + pools[op].slice(0, 8).map((p) =>
+          `<span class="chip${p.sampled ? '' : ' stalled'}" title="${p.sampled ? `median ${fmtS(p.median)}, n=${p.count}` : ''}${p.stalled ? `${p.sampled ? '; ' : ''}left unfinished after ${fmtS(p.unfinishedMax)}` : ''}">` +
+          `${esc(p.key)} · ${fmtS(p.score)} · ${p.sampled ? 'n=' + p.count : 'unfinished'} · ${Math.round(p.weight * 100)}%</span>`).join('') +
+          (pools[op].length > 8 ? `<span class="muted small"> +${pools[op].length - 8} more</span>` : '') + '</div>';
+      });
     }
+    prev.innerHTML = html;
   }
 
   function onSetupChange() {
@@ -834,8 +860,19 @@
   /* ---------------- wiring ---------------- */
 
   function bind() {
-    $('#setup-form').addEventListener('change', onSetupChange);
-    $('#setup-form').addEventListener('input', (e) => { if (e.target.type === 'text' || e.target.type === 'number') onSetupChange(); });
+    $('#setup-form').addEventListener('change', (e) => {
+      if (e.target.dataset.range) return; // handled on input
+      if (e.target.name === 'mode') {
+        state.settings.mode = e.target.value;
+        fillOps();
+      }
+      onSetupChange();
+      if (e.target.name === 'difficulty') fillRanges();
+    });
+    $('#setup-form').addEventListener('input', (e) => {
+      if (e.target.dataset.range) onRangeInput();
+      else if (e.target.type === 'text' || e.target.type === 'number') onSetupChange();
+    });
     $('#setup-form').addEventListener('submit', (e) => { e.preventDefault(); if (!$('#start-btn').disabled) startRound(); });
 
     $('#answer').addEventListener('input', onAnswerInput);
@@ -881,6 +918,7 @@
       e.target.value = '';
     });
     $('#clear-btn').addEventListener('click', clearHistory);
+    $('#jump-data').addEventListener('click', () => $('#data-card').scrollIntoView({ behavior: 'smooth', block: 'start' }));
   }
 
   function init() {

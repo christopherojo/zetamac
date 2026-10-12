@@ -219,51 +219,121 @@ test('settings keys separate modes, durations, ops and ranges; personal best res
   assert.equal(Z.personalBest(sessions, k, 'a'), null);
 });
 
-test('targeted: parsing, weighting toward slow pairs, random mix, and fallback', () => {
+const tq = (op, a, b, ms, status) => Object.assign(Z.makeQuestion(op, a, b), { ms, status: status || 'completed' });
+const ALL = Z.PRESETS.medium;
+
+test('targeted: parsing numbers and operand pairs', () => {
   assert.deepEqual(Z.parseNumbers('7, 8 8;13'), [7, 8, 13]);
-  assert.deepEqual(Z.parsePairs('7x8, 8*7, 6×9'), [[7, 8], [6, 9]]);
+  assert.deepEqual(Z.parsePairs('7x8, 8*7, 6×9, 47+38, 12 13'), [[7, 8], [6, 9], [47, 38], [12, 13]]);
   assert.throws(() => Z.parsePairs('7-8'));
   assert.throws(() => Z.targetConfig({ focus: 'numbers', numbers: '', partner: [2, 12], randomPct: 25 }));
+});
 
-  const mul = Z.PRESETS.medium.mul;
-  const empty = Z.buildTargetPlan({ focus: 'slowest', randomPct: 25 }, mul, []);
-  assert.ok(empty.fallback);
-  const r0 = rng(3);
-  for (let i = 0; i < 100; i++) assert.equal(empty.next(r0).source, 'random');
+test('targeted: problems keep order for − and ÷, ignore it for + and ×', () => {
+  assert.equal(Z.problemKey(tq('mul', 8, 7)), Z.problemKey(tq('mul', 7, 8)));
+  assert.equal(Z.problemKey(tq('add', 38, 47)), Z.problemKey(tq('add', 47, 38)));
+  assert.notEqual(Z.problemKey(tq('sub', 7, 8)), Z.problemKey(tq('sub', 8, 7))); // 15−7 vs 15−8
+  assert.notEqual(Z.problemKey(tq('div', 7, 8)), Z.problemKey(tq('div', 8, 7))); // 56÷7 vs 56÷8
+  assert.notEqual(Z.problemKey(tq('mul', 7, 8)), Z.problemKey(tq('div', 7, 8)));
+  // Range fit uses generator operands: 300 + 5 is outside Medium, 15 − 7 is inside.
+  assert.equal(Z.problemFits(tq('add', 300, 5), ALL), false);
+  assert.equal(Z.problemFits(tq('sub', 7, 8), ALL), true);
+  assert.equal(Z.problemFits(tq('div', 13, 8), ALL), false); // divisor 13 is outside 2–12
+  assert.equal(Z.problemFits(tq('mul', 50, 7), ALL), true); // either order for ×
+});
 
-  const history = [];
-  const add = (a, b, ms, n) => { for (let i = 0; i < n; i++) history.push({ a, b, ms }); };
-  add(7, 8, 4000, 5); add(6, 9, 2000, 5); add(3, 4, 1000, 6); add(12, 13, 9000, 4); // 12x13 under-sampled
-  const plan = Z.buildTargetPlan({ focus: 'slowest', randomPct: 20 }, mul, history);
-  assert.equal(plan.fallback, null);
-  assert.deepEqual(plan.pool.map((p) => p.lo + 'x' + p.hi), ['7x8', '6x9', '3x4']);
+test('targeted: slowest candidates use median (5+ samples) and qualifying unfinished problems', () => {
+  const h = [];
+  const rep = (op, a, b, ms, n) => { for (let i = 0; i < n; i++) h.push(tq(op, a, b, ms)); };
+  rep('sub', 7, 8, 4000, 5);    // 15 − 7: sampled, median 4 s
+  rep('sub', 9, 9, 3000, 5);    // 18 − 9: sampled, 3 s
+  rep('sub', 20, 30, 1000, 20); // filler: typical time 1 s
+  rep('sub', 40, 2, 9000, 4);   // only 4 samples, not unfinished: excluded
+  h.push(tq('sub', 50, 25, 2500, 'unfinished')); // stalled 2.5 s > typical 1 s: candidate
+  h.push(tq('sub', 60, 10, 400, 'unfinished'));  // 0.4 s at the buzzer: not a weakness signal
+  h.push(tq('sub', 70, 11, 60000, 'unfinished')); // capped at 3× typical
+  const c = Z.slowestCandidates(h, 'sub', ALL);
+  const byKey = Object.fromEntries(c.map((p) => [p.key, p]));
+  assert.deepEqual(Object.keys(byKey).sort(), ['15 − 7', '18 − 9', '50 − 20', '75 − 50', '81 − 70'].sort());
+  assert.equal(byKey['15 − 7'].score, 4000);
+  assert.equal(byKey['75 − 50'].stalled, true);
+  assert.equal(byKey['75 − 50'].sampled, false);
+  assert.equal(byKey['81 − 70'].score, 3000, 'unfinished time capped at 3× typical');
+  assert.equal(byKey['50 − 20'].score, 1000);
+  assert.ok(!('42 − 40' in byKey), 'under-sampled, never unfinished');
+  assert.ok(!('70 − 60' in byKey), 'short unfinished time ignored');
+  // Other operations are separate.
+  assert.equal(Z.slowestCandidates(h, 'add', ALL).length, 0);
+});
+
+test('targeted: slowest plan picks ops evenly, weights slow problems, keeps randoms, falls back per op', () => {
+  const h = [];
+  const rep = (op, a, b, ms, n) => { for (let i = 0; i < n; i++) h.push(tq(op, a, b, ms)); };
+  rep('mul', 7, 8, 4000, 5); rep('mul', 6, 9, 2000, 5); rep('mul', 3, 4, 1000, 6); rep('mul', 12, 13, 9000, 4);
+  rep('div', 7, 8, 5000, 5); rep('div', 8, 7, 1000, 5); rep('div', 6, 6, 3000, 5);
+  const ops = ['add', 'mul', 'div'];
+  const plan = Z.buildTargetPlan({ focus: 'slowest', randomPct: 20 }, ALL, ops, h);
+  assert.deepEqual(plan.randomOps, ['add']);
+  assert.match(plan.fallback, /addition/);
+  assert.deepEqual(plan.pools.mul.map((p) => p.key), ['7 × 8', '6 × 9', '3 × 4']);
   const r = rng(9);
   const counts = {};
-  let random = 0;
-  let prev = null;
-  let repeats = 0;
-  for (let i = 0; i < 20000; i++) {
+  const opCount = { add: 0, mul: 0, div: 0 };
+  let targetedAdd = 0, randomMul = 0, mulTotal = 0, prev = null, repeats = 0;
+  for (let i = 0; i < 30000; i++) {
     const q = plan.next(r);
-    assert.equal(q.op, 'mul');
-    assert.equal(q.answer, q.left * q.right);
-    if (q.source === 'random') { random++; prev = null; continue; }
-    const key = Z.pairKey(q.left, q.right);
-    if (key === prev) repeats++;
+    opCount[q.op]++;
+    assert.ok(Z.checkAnswer(String(q.answer), q.answer));
+    if (q.op === 'add' && q.source === 'target') targetedAdd++;
+    if (q.op === 'mul') { mulTotal++; if (q.source === 'random') randomMul++; }
+    const key = Z.problemKey(q);
+    if (q.source === 'target') { counts[key] = (counts[key] || 0) + 1; if (key === prev) repeats++; }
     prev = key;
-    counts[key] = (counts[key] || 0) + 1;
   }
-  assert.ok(Math.abs(random / 20000 - 0.2) < 0.02, 'random share ≈ 20%');
-  assert.equal(counts['12×13'], undefined, 'under-sampled pairs are not targeted');
-  assert.ok(counts['7×8'] > counts['6×9'] && counts['6×9'] > counts['3×4'], 'slower pairs appear more often');
-  assert.ok(repeats < 200, 'immediate repeats are rare');
+  for (const op of ops) assert.ok(Math.abs(opCount[op] / 30000 - 1 / 3) < 0.02, `${op} chosen evenly`);
+  assert.equal(targetedAdd, 0, 'addition has no history: always random');
+  assert.ok(Math.abs(randomMul / mulTotal - 0.2) < 0.02, 'random share ≈ 20% within targeted ops');
+  assert.equal(counts['12 × 13'], undefined, 'under-sampled pair not targeted');
+  assert.ok(counts['7 × 8'] > counts['6 × 9'] && counts['6 × 9'] > counts['3 × 4'], 'slower problems appear more often');
+  assert.ok(counts['56 ÷ 7'] > counts['36 ÷ 6'] && counts['36 ÷ 6'] > counts['56 ÷ 8'], 'division keeps orientation and weighting');
+  assert.ok(repeats < 300, 'immediate repeats are rare');
 
-  const nums = Z.buildTargetPlan(Z.targetConfig({ focus: 'numbers', numbers: '7', partner: [2, 12], randomPct: 0 }), mul, []);
-  for (let i = 0; i < 2000; i++) {
+  const none = Z.buildTargetPlan({ focus: 'slowest', randomPct: 25 }, ALL, ['add', 'sub'], []);
+  assert.match(none.fallback, /random practice/);
+  for (let i = 0; i < 200; i++) assert.equal(none.next(r).source, 'random');
+});
+
+test('targeted: numbers and operand pairs apply to every selected operation', () => {
+  const r = rng(5);
+  const nums = Z.buildTargetPlan(Z.targetConfig({ focus: 'numbers', numbers: '7', partner: [2, 12], randomPct: 0 }), ALL, Z.OPS, []);
+  const seen = new Set();
+  for (let i = 0; i < 4000; i++) {
     const q = nums.next(r);
-    assert.ok(q.left === 7 || q.right === 7);
-    const other = q.left === 7 ? q.right : q.left;
+    seen.add(q.op);
+    const [a, b] = Z.operandsOf(q);
+    assert.ok(a === 7 || b === 7, `${Z.problemKey(q)} uses 7`);
+    const other = a === 7 ? b : a;
     assert.ok(other >= 2 && other <= 12);
   }
+  assert.equal(seen.size, 4);
+  const pairs = Z.buildTargetPlan(Z.targetConfig({ focus: 'pairs', pairs: '7x8', randomPct: 0 }), ALL, ['sub', 'div'], []);
+  const keys = new Set();
+  for (let i = 0; i < 500; i++) keys.add(Z.problemKey(pairs.next(r)));
+  assert.deepEqual([...keys].sort(), ['15 − 7', '15 − 8', '56 ÷ 7', '56 ÷ 8']);
+});
+
+test('targeted settings keys: multiplication-only keeps the old key; other op sets are separate', () => {
+  const base = { mode: 'targeted', difficulty: 'medium', ranges: ALL, duration: 120, target: { focus: 'slowest', randomPct: 25 } };
+  const mulOnly = Z.settingsKey(Object.assign({ ops: ['mul'] }, base));
+  assert.equal(mulOnly, 'targeted|120|slowest|random:25|mul:2-12,2-100', 'same key as rounds saved before this change');
+  const mixed = Z.settingsKey(Object.assign({ ops: ['add', 'mul'] }, base));
+  assert.notEqual(mixed, mulOnly);
+  assert.match(mixed, /ops:add\+mul/);
+  assert.notEqual(mixed, Z.settingsKey(Object.assign({}, base, { mode: 'standard', ops: ['add', 'mul'] })));
+  assert.match(Z.settingsLabel(Object.assign({ ops: ['add', 'mul'] }, base)), /^Targeted · slowest problems · \+ × · 25% random · Medium/);
+  const s = Z.sanitizeSettings({ targeted: { ops: { add: false, sub: false, mul: false, div: false } } });
+  assert.deepEqual(Z.enabledOps(s.targeted.ops), Z.OPS, 'empty targeted op set rejected');
+  assert.deepEqual(Z.enabledOps(Z.sanitizeSettings({ targeted: { ops: { sub: true } } }).targeted.ops), ['sub']);
 });
 
 function sampleSession(id, score, extra) {

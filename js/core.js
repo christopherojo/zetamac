@@ -47,6 +47,7 @@
         pairs: '7x8, 6x9, 7x12',
         partner: [2, 12],
         randomPct: 25,
+        ops: { add: true, sub: true, mul: true, div: true },
       },
     };
   }
@@ -94,6 +95,11 @@
       if (typeof t.pairs === 'string') s.targeted.pairs = t.pairs.slice(0, 1000);
       if (validRange(t.partner)) s.targeted.partner = t.partner.slice();
       if (isInt(t.randomPct) && t.randomPct >= 0 && t.randomPct <= 50) s.targeted.randomPct = t.randomPct;
+      if (t.ops && typeof t.ops === 'object') {
+        const ops = {};
+        OPS.forEach((o) => { ops[o] = !!t.ops[o]; });
+        if (enabledOps(ops).length) s.targeted.ops = ops;
+      }
     }
     return s;
   }
@@ -140,13 +146,14 @@
     return out;
   }
 
+  // Operand pairs such as "7x8, 6 9, 47+38". Order is not significant.
   function parsePairs(text) {
     const out = [];
     const seen = new Set();
     String(text).split(/[,;\n]+/).forEach((tok) => {
       tok = tok.trim();
       if (!tok) return;
-      const m = /^(\d+)\s*[x×*]\s*(\d+)$/i.exec(tok);
+      const m = /^(\d+)\s*(?:[x×*+]|\s)\s*(\d+)$/i.exec(tok);
       if (!m) throw new Error(`"${tok}" is not a pair like 7x8`);
       const a = Number(m[1]);
       const b = Number(m[2]);
@@ -167,7 +174,7 @@
     if (t.focus === 'numbers') {
       cfg.numbers = parseNumbers(t.numbers);
       if (!cfg.numbers.length) throw new Error('Enter at least one number to practise.');
-      if (!validRange(t.partner)) throw new Error('The partner factor range is invalid.');
+      if (!validRange(t.partner)) throw new Error('The partner range is invalid.');
       cfg.partner = t.partner.slice();
     } else if (t.focus === 'pairs') {
       cfg.pairs = parsePairs(t.pairs);
@@ -176,72 +183,141 @@
     return cfg;
   }
 
-  function inMulRanges(lo, hi, mulRanges) {
-    const [r1, r2] = mulRanges;
-    const inR = (n, r) => n >= r[0] && n <= r[1];
-    return (inR(lo, r1) && inR(hi, r2)) || (inR(hi, r1) && inR(lo, r2));
+  const inR = (n, r) => n >= r[0] && n <= r[1];
+
+  // Generator operands (a from the first range, b from the second) behind a question.
+  function operandsOf(q) {
+    if (q.op === 'sub' || q.op === 'div') return [q.right, q.answer];
+    return [q.left, q.right];
+  }
+
+  // A "problem" is what the learner sees: a + b and a × b ignore order; a − b and a ÷ b keep it.
+  function problemKey(q) {
+    const sym = OP_SYMBOL[q.op];
+    if (q.op === 'add' || q.op === 'mul') return `${Math.min(q.left, q.right)} ${sym} ${Math.max(q.left, q.right)}`;
+    return `${q.left} ${sym} ${q.right}`;
+  }
+
+  // Could the standard generator produce this problem with these ranges?
+  function problemFits(q, ranges) {
+    const [r0, r1] = q.op === 'add' || q.op === 'sub' ? ranges.add : ranges.mul;
+    const [a, b] = operandsOf(q);
+    if (q.op === 'add' || q.op === 'mul') return (inR(a, r0) && inR(b, r1)) || (inR(b, r0) && inR(a, r1));
+    return inR(a, r0) && inR(b, r1);
   }
 
   /*
-   * Build a question source for targeted mode. `history` is a list of completed
-   * multiplication observations ({a, b, ms}) used by the "slowest pairs" focus.
-   * Returns { next(rng), fallback, pool, description }.
+   * Per-problem timing for one operation, from questions with any status.
+   * Completed answers give count/median; unfinished ones are tracked separately.
    */
-  function buildTargetPlan(cfg, mulRanges, history) {
-    const randomShare = cfg.randomPct / 100;
-    const randomMul = (rng) => {
-      const q = makeQuestion('mul', randInt(mulRanges[0][0], mulRanges[0][1], rng),
-        randInt(mulRanges[1][0], mulRanges[1][1], rng));
-      q.source = 'random';
-      return q;
-    };
-    let pick = null; // (rng) => [a, b]
-    let pool = [];
-    let fallback = null;
-
-    if (cfg.focus === 'numbers') {
-      pick = (rng) => [cfg.numbers[Math.floor(rng() * cfg.numbers.length)],
-        randInt(cfg.partner[0], cfg.partner[1], rng)];
-    } else if (cfg.focus === 'pairs') {
-      pick = (rng) => cfg.pairs[Math.floor(rng() * cfg.pairs.length)];
-    } else {
-      const ranked = rankPairs(pairStats(history)).ranked
-        .filter((p) => inMulRanges(p.lo, p.hi, mulRanges))
-        .slice(0, SLOWEST_POOL_SIZE);
-      if (ranked.length < MIN_SLOWEST_PAIRS) {
-        fallback = `Not enough history yet: slowest-pair practice needs at least ${MIN_SLOWEST_PAIRS} pairs ` +
-          `with ${MIN_PAIR_SAMPLES}+ completed answers inside the current multiplication ranges ` +
-          `(found ${ranked.length}). Using random multiplication instead.`;
-      } else {
-        const weights = ranked.map((p) => p.median * p.median);
-        const total = weights.reduce((x, y) => x + y, 0);
-        pool = ranked.map((p, i) => ({ lo: p.lo, hi: p.hi, median: p.median, count: p.count, weight: weights[i] / total }));
-        pick = (rng) => {
-          let u = rng();
-          for (const p of pool) { if ((u -= p.weight) < 0) return [p.lo, p.hi]; }
-          const last = pool[pool.length - 1];
-          return [last.lo, last.hi];
-        };
+  function problemStats(questions, op) {
+    const map = new Map();
+    for (const q of questions) {
+      if (q.op !== op) continue;
+      const key = problemKey(q);
+      let g = map.get(key);
+      if (!g) {
+        const sample = (q.op === 'add' || q.op === 'mul')
+          ? { left: Math.min(q.left, q.right), right: Math.max(q.left, q.right) } : { left: q.left, right: q.right };
+        g = { key, op, left: sample.left, right: sample.right, answer: q.answer, times: [], unfinished: [] };
+        map.set(key, g);
       }
+      (q.status === 'completed' ? g.times : g.unfinished).push(q.ms);
+    }
+    return Array.from(map.values()).map((g) => {
+      const s = summarize(g.times);
+      return { key: g.key, op, left: g.left, right: g.right, answer: g.answer, count: s.count, median: s.median, mean: s.mean,
+        max: s.max, unfinishedCount: g.unfinished.length, unfinishedMax: g.unfinished.length ? Math.max(...g.unfinished) : null };
+    });
+  }
+
+  /*
+   * Slowest-problem candidates for one operation, inside the current ranges.
+   * - Problems with MIN_PAIR_SAMPLES+ completed answers score their median time.
+   * - Problems left unfinished at the buzzer score the time spent on them, but only
+   *   when that is longer than the operation's typical (median) completed time.
+   * Unfinished times are capped at 3× the typical time so one stalled question can't dominate.
+   */
+  function slowestCandidates(questions, op, ranges) {
+    const typical = median(questions.filter((q) => q.op === op && q.status === 'completed').map((q) => q.ms));
+    const cap = typical ? typical * 3 : Infinity;
+    const out = [];
+    for (const p of problemStats(questions, op)) {
+      if (!problemFits({ op, left: p.left, right: p.right, answer: p.answer }, ranges)) continue;
+      const sampled = p.count >= MIN_PAIR_SAMPLES;
+      const stalled = p.unfinishedCount > 0 && (typical == null || p.unfinishedMax > typical);
+      if (!sampled && !stalled) continue;
+      const score = Math.max(sampled ? p.median : 0, stalled ? Math.min(p.unfinishedMax, cap) : 0);
+      out.push(Object.assign({}, p, { score, sampled, stalled }));
+    }
+    return out.sort((x, y) => y.score - x.score || y.count - x.count || (x.key < y.key ? -1 : 1))
+      .slice(0, SLOWEST_POOL_SIZE);
+  }
+
+  function weightedPick(pool, rng) {
+    let u = rng();
+    for (const p of pool) { if ((u -= p.weight) < 0) return p; }
+    return pool[pool.length - 1];
+  }
+
+  /*
+   * Question source for targeted mode across the selected operations.
+   * `history` is a list of past questions (completed and unfinished) from completed rounds.
+   * Each question first picks an operation evenly, then either a random question for it
+   * (randomPct%, or always when that operation has too little history) or a targeted one.
+   * Returns { next(rng), fallback, randomOps, pools }.
+   */
+  function buildTargetPlan(cfg, ranges, ops, history) {
+    const randomShare = cfg.randomPct / 100;
+    const pickers = {};
+    const pools = {};
+    const randomOps = [];
+
+    for (const op of ops) {
+      if (cfg.focus === 'numbers') {
+        pickers[op] = (rng) => [cfg.numbers[Math.floor(rng() * cfg.numbers.length)], randInt(cfg.partner[0], cfg.partner[1], rng)];
+      } else if (cfg.focus === 'pairs') {
+        pickers[op] = (rng) => cfg.pairs[Math.floor(rng() * cfg.pairs.length)].slice();
+      } else {
+        const cands = slowestCandidates(history, op, ranges);
+        if (cands.length < MIN_SLOWEST_PAIRS) { randomOps.push(op); pools[op] = []; continue; }
+        const weights = cands.map((p) => p.score * p.score);
+        const total = weights.reduce((x, y) => x + y, 0);
+        pools[op] = cands.map((p, i) => Object.assign({}, p, { weight: weights[i] / total }));
+        // Sub/div keep their exact orientation; add/mul are shuffled in next().
+        pickers[op] = (rng) => operandsOf(weightedPick(pools[op], rng));
+      }
+    }
+
+    let fallback = null;
+    if (randomOps.length === ops.length) {
+      fallback = 'Not enough history yet, so this round is random practice. Slowest-problem practice needs ' +
+        `${MIN_SLOWEST_PAIRS} problems per operation that you've answered ${MIN_PAIR_SAMPLES}+ times or left unfinished.`;
+    } else if (randomOps.length) {
+      fallback = `Random questions for ${randomOps.map((o) => OP_NAME[o].toLowerCase()).join(', ')}: not enough history yet.`;
     }
 
     let prevKey = null;
     function next(rng) {
+      const op = ops[Math.floor(rng() * ops.length)];
       let q;
-      if (!pick || rng() < randomShare) {
-        q = randomMul(rng);
+      if (!pickers[op] || rng() < randomShare) {
+        q = generateStandard(ranges, [op], rng);
+        q.source = 'random';
       } else {
-        // Avoid showing the identical pair twice in a row when there is a choice.
-        let ab = pick(rng);
-        for (let i = 0; i < 20 && pairKey(ab[0], ab[1]) === prevKey; i++) ab = pick(rng);
-        const [x, y] = rng() < 0.5 ? ab : [ab[1], ab[0]];
-        q = makeQuestion('mul', x, y);
+        // Avoid showing the identical problem twice in a row when there is a choice.
+        for (let i = 0; i < 20; i++) {
+          let [a, b] = pickers[op](rng);
+          if (cfg.focus !== 'slowest' || op === 'add' || op === 'mul') { if (rng() < 0.5) [a, b] = [b, a]; }
+          q = makeQuestion(op, a, b);
+          if (problemKey(q) !== prevKey) break;
+        }
         q.source = 'target';
       }
-      prevKey = pairKey(q.left, q.right);
+      prevKey = problemKey(q);
       return q;
     }
-    return { next, fallback, pool };
+    return { next, fallback, randomOps, pools };
   }
 
   /* ---------------- round engine ---------------- */
@@ -353,7 +429,13 @@
       let detail = 'slowest';
       if (t.focus === 'numbers') detail = `numbers:${t.numbers.join(',')}|partner:${rangeStr(t.partner)}`;
       if (t.focus === 'pairs') detail = `pairs:${t.pairs.map((p) => pairKey(p[0], p[1])).sort().join(',')}`;
-      return `targeted|${s.duration}|${detail}|random:${t.randomPct}|${mul}`;
+      const ops = OPS.filter((o) => s.ops.includes(o));
+      // Multiplication-only keys keep the original format, so older targeted rounds still compare.
+      if (ops.length === 1 && ops[0] === 'mul') return `targeted|${s.duration}|${detail}|random:${t.randomPct}|${mul}`;
+      const parts = ['targeted', s.duration, detail, `random:${t.randomPct}`, `ops:${ops.join('+')}`];
+      if (usesAdd(ops)) parts.push(`add:${rangeStr(s.ranges.add[0])},${rangeStr(s.ranges.add[1])}`);
+      if (usesMul(ops)) parts.push(mul);
+      return parts.join('|');
     }
     const ops = OPS.filter((o) => s.ops.includes(o));
     const parts = ['standard', s.duration, ops.join('+')];
@@ -383,10 +465,12 @@
   function settingsLabel(s) {
     if (s.mode === 'targeted') {
       const t = s.target || {};
-      let focus = 'slowest pairs';
-      if (t.focus === 'numbers') focus = `numbers ${t.numbers.join(', ')} × ${rangeLabel(t.partner)}`;
-      if (t.focus === 'pairs') focus = `pairs ${t.pairs.map((p) => `${p[0]}×${p[1]}`).join(', ')}`;
-      return `Targeted · ${focus} · ${t.randomPct}% random · ${difficultyLabel(s.ranges, ['mul'])} × · ${durationLabel(s.duration)}`;
+      const ops = OPS.filter((o) => s.ops.includes(o));
+      let focus = 'slowest problems';
+      if (t.focus === 'numbers') focus = `numbers ${t.numbers.join(', ')} with ${rangeLabel(t.partner)}`;
+      if (t.focus === 'pairs') focus = `pairs ${t.pairs.map((p) => `${p[0]}&${p[1]}`).join(', ')}`;
+      return `Targeted · ${focus} · ${ops.map((o) => OP_SYMBOL[o]).join(' ')} · ${t.randomPct}% random · ` +
+        `${difficultyLabel(s.ranges, ops)} · ${durationLabel(s.duration)}`;
     }
     const ops = OPS.filter((o) => s.ops.includes(o));
     return `${difficultyLabel(s.ranges, ops)} · ${durationLabel(s.duration)} · ${ops.map((o) => OP_SYMBOL[o]).join(' ')}`;
@@ -700,6 +784,7 @@
     defaultSettings, sanitizeSettings, validRange, validRanges, rangesFor, enabledOps,
     randInt, makeQuestion, generateStandard, checkAnswer,
     parseNumbers, parsePairs, pairKey, targetConfig, buildTargetPlan,
+    problemKey, problemFits, problemStats, slowestCandidates, operandsOf,
     makeId, Round,
     settingsKey, settingsLabel, difficultyLabel, durationLabel, rangeLabel,
     median, summarize, completedOf, unfinishedOf, opBreakdown, mulObservations, pairStats, rankPairs,

@@ -30,8 +30,9 @@ function check(cond, msg) {
   console.log('  ✓ ' + msg);
 }
 
+let current = null; // Chrome process, killed on any failure
 async function launch() {
-  const proc = spawn(CHROME, [
+  const proc = current = spawn(CHROME, [
     '--headless=new', `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`,
     '--no-first-run', '--no-default-browser-check', '--disable-extensions',
     // Offline: every network request would fail.
@@ -122,6 +123,27 @@ async function main() {
     document.querySelector('input[name=duration]:checked').value === '120' &&
     [...document.querySelectorAll('input[name=op]')].every(i => i.checked)`), 'defaults: Medium, 120 s, all four operations');
 
+  const rangeVals = `[...document.querySelectorAll('[data-range]')].map(i => i.value).join(',')`;
+  const diff = `document.querySelector('input[name=difficulty]:checked').value`;
+  check(await cdp.evaluate(rangeVals) === '2,100,2,100,2,12,2,100', 'range fields show the Medium preset');
+  await cdp.evaluate(`document.querySelector('input[name=difficulty][value=hard]').click()`);
+  check(await cdp.evaluate(rangeVals) === '2,300,2,300,2,20,2,200', 'selecting Hard fills the range fields');
+  await cdp.evaluate(`const i = document.querySelector('[data-range="add.0.1"]'); i.value = '250'; i.dispatchEvent(new Event('input', {bubbles: true}))`);
+  check(await cdp.evaluate(diff) === 'custom', 'editing a range switches to Custom');
+  check(await cdp.evaluate(rangeVals) === '2,250,2,300,2,20,2,200', 'other range values are kept after the edit');
+  await cdp.evaluate(`document.querySelector('input[name=difficulty][value=medium]').click()`);
+  check(await cdp.evaluate(rangeVals) === '2,100,2,100,2,12,2,100', 'switching back to Medium shows Medium values');
+  await cdp.evaluate(`document.querySelector('input[name=difficulty][value=custom]').click()`);
+  check(await cdp.evaluate(rangeVals) === '2,250,2,300,2,20,2,200', 'choosing Custom restores the edited ranges');
+  await cdp.evaluate(`location.reload()`);
+  await sleep(300);
+  await waitFor(cdp, `document.readyState === 'complete' && !!window.ZCore`);
+  check(await cdp.evaluate(diff) === 'custom' && await cdp.evaluate(rangeVals) === '2,250,2,300,2,20,2,200', 'custom ranges persist across reload');
+  await cdp.evaluate(`const i = document.querySelector('[data-range="mul.1.0"]'); i.value = ''; i.dispatchEvent(new Event('input', {bubbles: true}))`);
+  check(await cdp.evaluate(`document.querySelector('#start-btn').disabled`), 'an empty range field blocks Start');
+  await cdp.evaluate(`document.querySelector('input[name=difficulty][value=medium]').click()`);
+  check(await cdp.evaluate(`!document.querySelector('#start-btn').disabled`) && await cdp.evaluate(diff) === 'medium', 'back on Medium, Start is enabled');
+
   // Choose Bullet (60 s) and confirm at-least-one-operation validation.
   await cdp.evaluate(`document.querySelector('input[name=duration][value="60"]').click()`);
   await cdp.evaluate(`[...document.querySelectorAll('input[name=op]')].forEach(i => { if (i.checked) i.click(); })`);
@@ -131,6 +153,8 @@ async function main() {
   check(await cdp.evaluate(`!document.querySelector('#start-btn').disabled`), 'start enabled again with operations selected');
 
   await shot(cdp, '1-setup');
+  await shot(cdp, '1b-setup-mobile', 390, 844);
+  if (SHOTS) await cdp.send('Emulation.clearDeviceMetricsOverride');
   await cdp.evaluate(`document.activeElement.blur()`);
   await key(cdp, 'Enter');
   await waitFor(cdp, `!document.querySelector('#screen-game').hidden`);
@@ -206,6 +230,9 @@ async function main() {
   const times = await cdp.evaluate(`[...document.querySelectorAll('#r-questions tbody tr td:nth-child(4)')].map(td => parseFloat(td.textContent))`);
   check(times.every((t, i) => i === 0 || times[i - 1] >= t), 'question table sorts by time');
 
+  await sleep(700);
+  check(await cdp.evaluate(`document.querySelector('#again-btn').classList.contains('primary') && document.activeElement.id === 'again-btn'`),
+    'Play again is the primary action and receives focus');
   await shot(cdp, '3-results');
   console.log('Round 2: abandoned with Escape');
   await cdp.evaluate(`document.querySelector('#again-btn').click()`);
@@ -215,6 +242,7 @@ async function main() {
   await waitFor(cdp, `!document.querySelector('#screen-results').hidden`);
   stored = await cdp.evaluate(storedSessions);
   check(stored.length === 2 && stored.some((s) => s.st === 'abandoned' && s.sc === 2), 'abandoned round saved and marked abandoned');
+  check(stored.every((x) => x.dur === 60 && JSON.stringify(x.r) === JSON.stringify(stored[0].r)), 'Play again reused the previous settings');
   check(await cdp.evaluate(`/abandoned/.test(document.querySelector('#r-status').textContent)`), 'results label the round as abandoned');
 
   console.log('Persistence: quit Chrome normally and reopen');
@@ -265,30 +293,93 @@ async function main() {
   check(/Imported 0 new rounds, skipped 2 duplicates/.test(await cdp.evaluate(`document.querySelector('#data-msg').textContent`)), 're-import skips duplicates');
   check((await cdp.evaluate(storedSessions)).length === 2, 'still exactly 2 rounds stored');
 
-  console.log('Targeted mode');
+  console.log('Targeted practice');
+  const opsChecked = `[...document.querySelectorAll('input[name=op]')].filter(i => i.checked).map(i => i.value).join()`;
   await cdp.evaluate(`document.querySelector('[data-nav=setup]').click()`);
   await cdp.evaluate(`document.querySelector('input[name=mode][value=targeted]').click()`);
+  check(await cdp.evaluate(`[...document.querySelectorAll('.op-row')].filter(r => !r.hidden).length`) === 4,
+    'targeted mode offers all four operations with their ranges');
+  check(await cdp.evaluate(`!document.querySelector('#targeted-panel').hidden && !!document.querySelector('details.how summary')`),
+    'targeted controls and "How selection works" are visible');
+  // Choose + and × for targeted; standard keeps its own selection.
+  await cdp.evaluate(`['sub', 'div'].forEach(o => { const i = document.querySelector('input[name=op][value=' + o + ']'); if (i.checked) i.click(); })`);
+  check(await cdp.evaluate(opsChecked) === 'add,mul', 'targeted operations set to + and ×');
+  await cdp.evaluate(`document.querySelector('input[name=mode][value=standard]').click()`);
+  check(await cdp.evaluate(opsChecked) === 'add,sub,mul,div', 'standard mode keeps its own operations');
+  await cdp.evaluate(`document.querySelector('input[name=mode][value=targeted]').click()`);
+  check(await cdp.evaluate(opsChecked) === 'add,mul', 'targeted operations restored when switching back');
+
   await cdp.evaluate(`document.querySelector('input[name=focus][value=numbers]').click()`);
   await cdp.evaluate(`const n = document.querySelector('#t-numbers'); n.value = '7'; n.dispatchEvent(new Event('input', {bubbles: true}));
     const r = document.querySelector('#t-random'); r.value = '0'; r.dispatchEvent(new Event('input', {bubbles: true}));`);
   await cdp.evaluate(`document.querySelector('#start-btn').click()`);
   await waitFor(cdp, `!document.querySelector('#screen-game').hidden`);
   const probs = [];
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 8; i++) {
     probs.push(await cdp.evaluate(`document.querySelector('#problem').textContent`));
     for (const d of String(await cdp.evaluate(currentAnswer))) await key(cdp, d);
   }
-  check(probs.every((p) => /^(7 × \d+|\d+ × 7)$/.test(p)), `targeted questions all involve 7 (${probs.join(', ')})`);
+  check(probs.every((p) => /^(7 [+×] \d+|\d+ [+×] 7)$/.test(p)), `targeted questions are + or × with 7 (${probs.join(', ')})`);
   await key(cdp, 'Escape');
   await waitFor(cdp, `!document.querySelector('#screen-results').hidden`);
   stored = await cdp.evaluate(storedSessions);
-  check(stored.some((s) => s.m === 'targeted' && s.tg && s.tg.focus === 'numbers'), 'targeted round stored with its target settings');
-  check(await cdp.evaluate(`/^Targeted/.test(document.querySelector('#r-label').textContent)`), 'targeted round labelled separately');
+  check(stored.some((s) => s.m === 'targeted' && s.tg && s.tg.focus === 'numbers' && s.o.join() === 'add,mul'),
+    'targeted round stored with its operations and target settings');
+  check(await cdp.evaluate(`/^Targeted · numbers 7 with 2–12 · \\+ ×/.test(document.querySelector('#r-label').textContent)`), 'targeted round labelled with its operations');
+
+  // Slowest problems: seed history with slow subtraction problems, one only ever left unfinished.
+  await cdp.evaluate(`(() => {
+    const Z = window.ZCore, qs = [];
+    const add = (a, b, ms, n, status) => { for (let i = 0; i < n; i++) qs.push(Object.assign(Z.makeQuestion('sub', a, b), { ms, status: status || 'completed' })); };
+    add(20, 30, 900, 30); add(7, 8, 4000, 5); add(9, 9, 3500, 5); add(6, 7, 3000, 5);
+    add(40, 33, 5000, 1, 'unfinished');
+    const s = { id: 'seed-sub', startedAt: Date.now() - 864e5, mode: 'standard', difficulty: 'medium', ranges: Z.PRESETS.medium,
+      ops: ['sub'], duration: 120, score: 45, status: 'completed', questions: qs.map((q, i) => Object.assign({ order: i + 1 }, q)) };
+    localStorage.setItem('zetamac.session.seed-sub', JSON.stringify(Z.toStored(Z.validateSession(s))));
+  })()`);
+  await cdp.send('Page.reload');
+  await waitFor(cdp, `document.readyState === 'complete' && !!window.ZCore && !document.querySelector('#screen-setup').hidden`);
+  check(await cdp.evaluate(`document.querySelector('input[name=mode]:checked').value`) === 'targeted', 'targeted mode remembered after reload');
+  await cdp.evaluate(`document.querySelector('input[name=focus][value=slowest]').click()`);
+  await cdp.evaluate(`['add', 'mul'].forEach(o => document.querySelector('input[name=op][value=' + o + ']').click());
+    document.querySelector('input[name=op][value=sub]').click()`);
+  check(await cdp.evaluate(opsChecked) === 'sub', 'targeted operations set to − only');
+  const chips = await cdp.evaluate(`[...document.querySelectorAll('#target-preview .chip')].map(c => c.textContent)`);
+  // Typical − time is 0.9 s, so the unfinished 73 − 40 (5 s) scores min(5 s, 3 × 0.9 s) = 2.7 s.
+  // (Round 1's unfinished question may also qualify; it is real history.)
+  const chipKeys = chips.map((c) => c.split(' · ')[0]);
+  const idx = (k) => chipKeys.indexOf(k);
+  check(['15 − 7', '18 − 9', '13 − 6', '73 − 40', '50 − 20'].every((k) => idx(k) >= 0) &&
+    idx('15 − 7') < idx('18 − 9') && idx('18 − 9') < idx('13 − 6') && idx('13 − 6') < idx('73 − 40') && idx('73 − 40') < idx('50 − 20') &&
+    chips[idx('73 − 40')].includes('unfinished') && chips[idx('73 − 40')].includes('2.70 s'),
+    `preview ranks slow problems by median and includes the unfinished one, capped (${chips.join(' | ')})`);
+  await shot(cdp, '6-targeted-setup');
+  if (SHOTS) await cdp.send('Emulation.clearDeviceMetricsOverride');
+  await cdp.evaluate(`document.querySelector('#start-btn').click()`);
+  await waitFor(cdp, `!document.querySelector('#screen-game').hidden`);
+  const pool = chipKeys;
+  const seen = [];
+  for (let i = 0; i < 8; i++) {
+    seen.push(await cdp.evaluate(`document.querySelector('#problem').textContent`));
+    for (const d of String(await cdp.evaluate(currentAnswer))) await key(cdp, d);
+  }
+  check(seen.every((p) => pool.includes(p)), `slowest-problem round draws only from the pool at 0% random (${seen.join(', ')})`);
+  check(seen.every((p, i) => i === 0 || p !== seen[i - 1]), 'no problem shown twice in a row');
+  await key(cdp, 'Escape');
+  await waitFor(cdp, `!document.querySelector('#screen-results').hidden`);
+  stored = await cdp.evaluate(storedSessions);
+  check(stored.some((s) => s.m === 'targeted' && s.tg.focus === 'slowest' && s.o.join() === 'sub' && s.q.every((q) => q[6] === 't')),
+    'slowest-problem round saved as targeted with targeted sources');
 
   await cdp.evaluate(`document.querySelector('[data-nav=stats]').click()`);
+  await cdp.evaluate(`document.querySelector('#f-mode').value = 'targeted'; document.querySelector('#f-mode').dispatchEvent(new Event('change')); document.querySelector('#f-abandoned').checked = true; document.querySelector('#f-abandoned').dispatchEvent(new Event('change'))`);
+  check(await cdp.evaluate(`[...document.querySelectorAll('#st-history tbody tr td:nth-child(2)')].every(td => td.textContent === 'targeted')`),
+    'statistics can show targeted rounds on their own');
+  await cdp.evaluate(`document.querySelector('#f-mode').value = 'all'; document.querySelector('#f-mode').dispatchEvent(new Event('change'))`);
   await shot(cdp, '4-stats');
   await shot(cdp, '5-stats-mobile', 390, 844);
   await cdp.send('Emulation.clearDeviceMetricsOverride');
+  const beforeFailure = (await cdp.evaluate(storedSessions)).length;
 
   console.log('Save failure is reported, not hidden');
   await cdp.evaluate(`Storage.prototype.setItem = function () { throw new DOMException('quota exceeded (simulated)', 'QuotaExceededError'); }`);
@@ -299,7 +390,7 @@ async function main() {
   await waitFor(cdp, `!document.querySelector('#screen-results').hidden`);
   check(await cdp.evaluate(`/Not saved/.test(document.querySelector('#r-saved').textContent)`), 'results say the round was NOT saved');
   check(await cdp.evaluate(`!document.querySelector('#banner').hidden && /could not be saved/.test(document.querySelector('#banner').textContent)`), 'banner warns about the unsaved round');
-  check((await cdp.evaluate(storedSessions)).length === 3, 'storage unchanged (3 rounds)');
+  check((await cdp.evaluate(storedSessions)).length === beforeFailure, `storage unchanged (${beforeFailure} rounds)`);
 
   console.log('Offline');
   const external = requests.filter((u) => !/^(file|data|blob|about|chrome|devtools):/.test(u));
@@ -319,5 +410,6 @@ main().then(() => {
   process.exit(0);
 }).catch((e) => {
   console.error(e);
+  if (current) current.kill();
   process.exit(1);
 });

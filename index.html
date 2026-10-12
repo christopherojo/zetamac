@@ -21,89 +21,106 @@
     <!-- ============ SETUP ============ -->
     <section id="screen-setup" class="screen">
       <form id="setup-form" class="card setup" autocomplete="off" novalidate>
-        <div class="field">
-          <span class="label">Mode</span>
-          <div class="seg">
-            <label><input type="radio" name="mode" value="standard"><span>Standard</span></label>
-            <label><input type="radio" name="mode" value="targeted"><span>Targeted ×</span></label>
-          </div>
+        <div class="setup-head">
+          <h1>Arithmetic practice</h1>
+          <p class="lede">Solve as many problems as you can before time runs out. Every answer is timed, so you can see what slows you down.</p>
         </div>
 
-        <div class="field">
-          <span class="label">Difficulty</span>
-          <div class="seg">
+        <fieldset class="group">
+          <legend>Mode</legend>
+          <div class="seg seg-2">
+            <label><input type="radio" name="mode" value="standard"><span><b>Standard</b><small>Mixed operations, Zetamac rules</small></span></label>
+            <label><input type="radio" name="mode" value="targeted"><span><b>Targeted practice</b><small>Drill your slowest problems or chosen numbers</small></span></label>
+          </div>
+        </fieldset>
+
+        <fieldset id="targeted-panel" class="group targeted" hidden>
+          <legend>Focus</legend>
+          <div class="seg seg-3">
+            <label><input type="radio" name="focus" value="slowest"><span>My slowest problems</span></label>
+            <label><input type="radio" name="focus" value="numbers"><span>Numbers</span></label>
+            <label><input type="radio" name="focus" value="pairs"><span>Operand pairs</span></label>
+          </div>
+          <div class="inline-row" data-focus="numbers">
+            <label for="t-numbers">Numbers</label>
+            <input id="t-numbers" type="text" placeholder="e.g. 7, 8, 13">
+            <span>with</span>
+            <input type="number" min="1" id="t-partner-min" class="num" aria-label="Partner minimum">
+            <span>to</span>
+            <input type="number" min="1" id="t-partner-max" class="num" aria-label="Partner maximum">
+          </div>
+          <div class="inline-row" data-focus="pairs">
+            <label for="t-pairs">Pairs</label>
+            <input id="t-pairs" type="text" placeholder="e.g. 7x8, 6x9, 47+38" class="wide">
+          </div>
+          <div class="inline-row">
+            <label for="t-random">Random mix</label>
+            <input id="t-random" type="number" min="0" max="50" step="5" class="num">
+            <span class="muted">% random questions</span>
+          </div>
+          <p id="target-explain" class="hint"></p>
+          <details class="how">
+            <summary>How selection works</summary>
+            <p id="target-details"></p>
+          </details>
+          <div id="target-preview" class="target-preview"></div>
+        </fieldset>
+
+        <fieldset class="group">
+          <legend>Difficulty</legend>
+          <div class="seg seg-4">
             <label><input type="radio" name="difficulty" value="easy"><span>Easy</span></label>
             <label><input type="radio" name="difficulty" value="medium"><span>Medium</span></label>
             <label><input type="radio" name="difficulty" value="hard"><span>Hard</span></label>
             <label><input type="radio" name="difficulty" value="custom"><span>Custom</span></label>
           </div>
-        </div>
-
-        <div id="custom-ranges" class="custom-ranges" hidden>
-          <div class="range-row"><span>Addition, first</span>
-            <input type="number" min="1" data-range="add.0.0"> – <input type="number" min="1" data-range="add.0.1"></div>
-          <div class="range-row"><span>Addition, second</span>
-            <input type="number" min="1" data-range="add.1.0"> – <input type="number" min="1" data-range="add.1.1"></div>
-          <div class="range-row"><span>Multiplication, first</span>
-            <input type="number" min="1" data-range="mul.0.0"> – <input type="number" min="1" data-range="mul.0.1"></div>
-          <div class="range-row"><span>Multiplication, second</span>
-            <input type="number" min="1" data-range="mul.1.0"> – <input type="number" min="1" data-range="mul.1.1"></div>
-          <p class="muted small">Subtraction and division reuse these ranges in reverse.</p>
-        </div>
-        <p id="range-summary" class="range-summary"></p>
-
-        <div class="field">
-          <span class="label">Duration</span>
-          <div class="seg">
-            <label><input type="radio" name="duration" value="60"><span>Bullet 60s</span></label>
-            <label><input type="radio" name="duration" value="120"><span>Blitz 120s</span></label>
-            <label><input type="radio" name="duration" value="180"><span>Rapid 180s</span></label>
-          </div>
-        </div>
-
-        <div class="field" id="ops-field">
-          <span class="label">Operations</span>
-          <div class="seg multi">
-            <label><input type="checkbox" name="op" value="add"><span>+ Addition</span></label>
-            <label><input type="checkbox" name="op" value="sub"><span>− Subtraction</span></label>
-            <label><input type="checkbox" name="op" value="mul"><span>× Multiplication</span></label>
-            <label><input type="checkbox" name="op" value="div"><span>÷ Division</span></label>
-          </div>
-        </div>
-
-        <div id="targeted-panel" class="targeted" hidden>
-          <div class="field">
-            <span class="label">Focus</span>
-            <div class="seg">
-              <label><input type="radio" name="focus" value="slowest"><span>My slowest pairs</span></label>
-              <label><input type="radio" name="focus" value="numbers"><span>Numbers</span></label>
-              <label><input type="radio" name="focus" value="pairs"><span>Pairs</span></label>
+          <div class="ranges" id="ops-field">
+            <div class="op-row" data-row="add">
+              <label class="op-name"><input type="checkbox" name="op" value="add"> Addition</label>
+              <span class="expr">
+                <input type="number" min="1" class="num" data-range="add.0.0" aria-label="Addition first minimum"> to
+                <input type="number" min="1" class="num" data-range="add.0.1" aria-label="Addition first maximum">
+                <span class="opsym">+</span>
+                <input type="number" min="1" class="num" data-range="add.1.0" aria-label="Addition second minimum"> to
+                <input type="number" min="1" class="num" data-range="add.1.1" aria-label="Addition second maximum">
+              </span>
+            </div>
+            <div class="op-row" data-row="sub">
+              <label class="op-name"><input type="checkbox" name="op" value="sub"> Subtraction</label>
+              <span class="expr muted">Addition in reverse</span>
+            </div>
+            <div class="op-row" data-row="mul">
+              <label class="op-name"><input type="checkbox" name="op" value="mul"> Multiplication</label>
+              <span class="expr">
+                <input type="number" min="1" class="num" data-range="mul.0.0" aria-label="Multiplication first minimum"> to
+                <input type="number" min="1" class="num" data-range="mul.0.1" aria-label="Multiplication first maximum">
+                <span class="opsym">×</span>
+                <input type="number" min="1" class="num" data-range="mul.1.0" aria-label="Multiplication second minimum"> to
+                <input type="number" min="1" class="num" data-range="mul.1.1" aria-label="Multiplication second maximum">
+              </span>
+            </div>
+            <div class="op-row" data-row="div">
+              <label class="op-name"><input type="checkbox" name="op" value="div"> Division</label>
+              <span class="expr muted">Multiplication in reverse</span>
             </div>
           </div>
-          <div class="field" data-focus="numbers">
-            <label class="label" for="t-numbers">Numbers</label>
-            <input id="t-numbers" type="text" placeholder="e.g. 7, 8, 13">
-            <span class="muted small">each multiplied by</span>
-            <input type="number" min="1" id="t-partner-min" class="narrow"> – <input type="number" min="1" id="t-partner-max" class="narrow">
+        </fieldset>
+
+        <fieldset class="group">
+          <legend>Duration</legend>
+          <div class="seg seg-3">
+            <label><input type="radio" name="duration" value="60"><span>Bullet · 1 min</span></label>
+            <label><input type="radio" name="duration" value="120"><span>Blitz · 2 min</span></label>
+            <label><input type="radio" name="duration" value="180"><span>Rapid · 3 min</span></label>
           </div>
-          <div class="field" data-focus="pairs">
-            <label class="label" for="t-pairs">Pairs</label>
-            <input id="t-pairs" type="text" placeholder="e.g. 7x8, 6x9, 12x13" class="wide">
-          </div>
-          <div class="field">
-            <label class="label" for="t-random">Random questions</label>
-            <input id="t-random" type="number" min="0" max="50" step="5" class="narrow"> <span class="muted">%</span>
-          </div>
-          <p id="target-explain" class="explain"></p>
-          <div id="target-preview" class="target-preview"></div>
-        </div>
+        </fieldset>
 
         <p id="setup-error" class="error" role="alert"></p>
         <div class="start-row">
           <button type="submit" id="start-btn" class="primary big">Start</button>
-          <span class="muted small">or press Enter</span>
+          <span class="muted small">or press <kbd>Enter</kbd></span>
+          <span id="setup-pb" class="muted small pb-line"></span>
         </div>
-        <p id="setup-pb" class="muted"></p>
       </form>
     </section>
 
@@ -128,16 +145,17 @@
     <!-- ============ RESULTS ============ -->
     <section id="screen-results" class="screen" hidden>
       <div class="card results-head">
-        <div>
-          <div class="muted" id="r-label"></div>
+        <div class="results-score">
+          <div class="muted small" id="r-label"></div>
           <div class="score-big"><span id="r-score">0</span> <small id="r-status"></small></div>
           <div id="r-pb"></div>
           <div id="r-saved" class="save-status"></div>
           <div id="r-note" class="muted small"></div>
         </div>
-        <div class="buttons">
-          <button type="button" id="again-btn" class="primary">Play again</button>
-          <button type="button" id="change-btn">Change settings</button>
+        <div class="results-actions">
+          <button type="button" id="again-btn" class="primary big">Play again</button>
+          <span class="muted small">Same settings · <kbd>Enter</kbd></span>
+          <button type="button" id="change-btn" class="ghost">Change settings</button>
         </div>
       </div>
       <div class="tiles" id="r-tiles"></div>
@@ -161,6 +179,10 @@
 
     <!-- ============ STATS ============ -->
     <section id="screen-stats" class="screen" hidden>
+      <div class="page-head">
+        <h1>Statistics</h1>
+        <button type="button" id="jump-data" class="ghost small">Backup &amp; data ↓</button>
+      </div>
       <div class="card filters">
         <label>Mode
           <select id="f-mode">
@@ -197,7 +219,7 @@
       </div>
       <div id="stats-body"></div>
 
-      <div class="card data-controls">
+      <div class="card data-controls" id="data-card">
         <h2>Your data</h2>
         <p class="muted small" id="storage-info"></p>
         <div class="buttons">
