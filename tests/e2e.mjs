@@ -230,6 +230,17 @@ async function main() {
   const times = await cdp.evaluate(`[...document.querySelectorAll('#r-questions tbody tr td:nth-child(4)')].map(td => parseFloat(td.textContent))`);
   check(times.every((t, i) => i === 0 || times[i - 1] >= t), 'question table sorts by time');
 
+  // Per-question timing chart: one bar per question in order, unfinished one hatched.
+  const bars = await cdp.evaluate(`[...document.querySelectorAll('#r-seq svg .bar')].map(b => b.getAttribute('class'))`);
+  check(bars.length === answered + 1, `timing chart has one bar per question (${bars.length})`);
+  check(bars[bars.length - 1] === 'bar unfinished' && bars.slice(0, -1).every((c) => /^bar op-(add|sub|mul|div)$/.test(c)),
+    'bars are coloured by operation and the last (unfinished) bar is marked');
+  check(await cdp.evaluate(`/median/.test(document.querySelector('#r-seq-note').textContent) && /round median/.test(document.querySelector('#r-seq .legend').textContent)`),
+    'chart has a slow-question summary and a legend');
+  const tipText = await cdp.evaluate(`(() => { const h = document.querySelectorAll('#r-seq .hit')[${timedIndex}];
+    h.dispatchEvent(new MouseEvent('mouseenter')); return document.querySelector('#r-seq .tooltip').textContent; })()`);
+  check(tipText.startsWith(`#${timedIndex + 1}`) && /\d\.\d\d s/.test(tipText), `hovering a bar shows that question (${tipText})`);
+
   await sleep(700);
   check(await cdp.evaluate(`document.querySelector('#again-btn').classList.contains('primary') && document.activeElement.id === 'again-btn'`),
     'Play again is the primary action and receives focus');
@@ -265,6 +276,17 @@ async function main() {
   await cdp.evaluate(`document.querySelector('#f-abandoned').click()`);
   check(await cdp.evaluate(`document.querySelectorAll('#st-history tbody tr').length`) === 2, 'abandoned round visible when included');
   check(await cdp.evaluate(`!!document.querySelector('#st-mul h2') || /multiplication/i.test(document.querySelector('#stats-body').textContent)`), 'multiplication analysis rendered');
+
+  // Past rounds open from Session history with the same per-question chart.
+  const firstId = stored.find((x) => x.st === 'completed').id;
+  await cdp.evaluate(`document.querySelector('[data-view="${firstId}"]').click()`);
+  await waitFor(cdp, `!document.querySelector('#screen-results').hidden`);
+  check(await cdp.evaluate(`document.querySelector('#again-btn').hidden && !document.querySelector('#back-stats-btn').hidden`),
+    'a past round opens in review mode with a Back to statistics button');
+  check(await cdp.evaluate(`document.querySelectorAll('#r-seq svg .bar').length`) === answered + 1, 'past round shows its per-question chart');
+  check(await cdp.evaluate(`document.querySelector('#r-score').textContent`) === String(answered), 'past round shows its own score');
+  await cdp.evaluate(`document.querySelector('#back-stats-btn').click()`);
+  check(await cdp.evaluate(`!document.querySelector('#screen-stats').hidden`), 'Back to statistics returns to Statistics');
 
   console.log('Backup: export, clear, import, re-import');
   await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: DOWNLOADS });
@@ -326,6 +348,8 @@ async function main() {
   check(stored.some((s) => s.m === 'targeted' && s.tg && s.tg.focus === 'numbers' && s.o.join() === 'add,mul'),
     'targeted round stored with its operations and target settings');
   check(await cdp.evaluate(`/^Targeted · numbers 7 with 2–12 · \\+ ×/.test(document.querySelector('#r-label').textContent)`), 'targeted round labelled with its operations');
+  check(await cdp.evaluate(`!document.querySelector('#again-btn').hidden && document.querySelector('#back-stats-btn').hidden`),
+    'a live round after reviewing a past one shows Play again again');
 
   // Slowest problems: seed history with slow subtraction problems, one only ever left unfinished.
   await cdp.evaluate(`(() => {

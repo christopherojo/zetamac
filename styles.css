@@ -15,6 +15,7 @@
   --accent-ink: #ffffff;
   --danger: #c23434;
   --good: #0a7d0a;
+  --op-add: #2a78d6; --op-sub: #eb6834; --op-mul: #1baf7a; --op-div: #eda100;
   --seq-1: #cde2fb; --seq-2: #9ec5f4; --seq-3: #6da7ec; --seq-4: #3987e5;
   --seq-5: #256abf; --seq-6: #184f95; --seq-7: #0d366b;
   --seq-ink-light: #0b0b0b; --seq-ink-dark: #ffffff;
@@ -30,6 +31,7 @@
     --bg: #0f1115; --surface: #1a1c21; --surface-2: #24272e;
     --ink: #f3f4f6; --ink-2: #c4c9d2; --muted: #9aa1ad; --line: #2c3038; --control: #3a3f49; --axis: #444a55;
     --accent: #4b8fe8; --accent-strong: #8dbaf3; --accent-soft: #1b2a40; --danger: #e05656; --good: #3cbf3c;
+    --op-add: #3987e5; --op-sub: #d95926; --op-mul: #199e70; --op-div: #c98500;
     --seq-1: #0d366b; --seq-2: #184f95; --seq-3: #256abf; --seq-4: #3987e5;
     --seq-5: #6da7ec; --seq-6: #9ec5f4; --seq-7: #cde2fb;
     --seq-ink-light: #ffffff; --seq-ink-dark: #0b0b0b;
@@ -40,6 +42,7 @@
   --bg: #0f1115; --surface: #1a1c21; --surface-2: #24272e;
   --ink: #f3f4f6; --ink-2: #c4c9d2; --muted: #9aa1ad; --line: #2c3038; --control: #3a3f49; --axis: #444a55;
   --accent: #4b8fe8; --accent-strong: #8dbaf3; --accent-soft: #1b2a40; --danger: #e05656; --good: #3cbf3c;
+    --op-add: #3987e5; --op-sub: #d95926; --op-mul: #199e70; --op-div: #c98500;
   --seq-1: #0d366b; --seq-2: #184f95; --seq-3: #256abf; --seq-4: #3987e5;
   --seq-5: #6da7ec; --seq-6: #9ec5f4; --seq-7: #cde2fb;
   --seq-ink-light: #ffffff; --seq-ink-dark: #0b0b0b;
@@ -313,13 +316,24 @@ tr.unfinished td { color: var(--muted); font-style: italic; }
 .controls-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 10px; font-size: 0.88rem; }
 
 .chart { width: 100%; height: auto; display: block; }
-.chart text { fill: var(--muted); font-size: 11px; font-family: var(--sans); }
+.chart text { fill: var(--muted); font-size: 11px; font-family: var(--sans);
+  paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
+.chart-scroll { position: relative; overflow-x: auto; }
+.chart-scroll .chart { min-width: 640px; }
 .chart .grid { stroke: var(--line); stroke-width: 1; }
 .chart .axis { stroke: var(--axis); stroke-width: 1; }
 .chart .line { fill: none; stroke: var(--accent); stroke-width: 2; }
 .chart .dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
 .chart .pb { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 4 4; }
 .chart .hit { fill: transparent; }
+.chart .bar.op-add { fill: var(--op-add); }
+.chart .bar.op-sub { fill: var(--op-sub); }
+.chart .bar.op-mul { fill: var(--op-mul); }
+.chart .bar.op-div { fill: var(--op-div); }
+.chart .bar.unfinished { fill: url(#hatch-unf); stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 2; }
+.chart .hatch-line { stroke: var(--muted); stroke-width: 2; }
+.chart .clip { fill: var(--ink-2); font-weight: 600; }
+.chart .hit:hover { fill: var(--ink); fill-opacity: 0.05; }
 .chart-wrap { position: relative; }
 .tooltip {
   position: absolute; pointer-events: none; z-index: 5;
@@ -348,5 +362,11 @@ td.hm-low { background-image: repeating-linear-gradient(45deg, var(--hatch) 0 1p
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 0.8rem; color: var(--ink-2); margin: 8px 0; }
 .legend .sw { display: inline-block; width: 22px; height: 14px; border-radius: 3px; vertical-align: middle; margin-right: 4px; }
 .legend .sw.none { outline: 1px dashed var(--axis); outline-offset: -1px; }
+.legend .sw.op-add { background: var(--op-add); }
+.legend .sw.op-sub { background: var(--op-sub); }
+.legend .sw.op-mul { background: var(--op-mul); }
+.legend .sw.op-div { background: var(--op-div); }
+.legend .sw.unf { outline: 1px dashed var(--muted); outline-offset: -1px; background-image: repeating-linear-gradient(45deg, var(--muted) 0 1.5px, transparent 1.5px 5px); }
+.legend .sw.dash { height: 0; border-top: 1px dashed var(--ink-2); border-radius: 0; }
 .legend .sw.low { background-color: var(--seq-5); background-image: repeating-linear-gradient(45deg, var(--hatch) 0 1px, transparent 1px 7px); }
 .data-controls .buttons { margin: 8px 0; }

@@ -154,11 +154,17 @@
         </div>
         <div class="results-actions">
           <button type="button" id="again-btn" class="primary big">Play again</button>
-          <span class="muted small">Same settings · <kbd>Enter</kbd></span>
+          <span class="muted small" id="again-hint">Same settings · <kbd>Enter</kbd></span>
           <button type="button" id="change-btn" class="ghost">Change settings</button>
+          <button type="button" id="back-stats-btn" class="primary" hidden>Back to statistics</button>
         </div>
       </div>
       <div class="tiles" id="r-tiles"></div>
+      <div class="card">
+        <h2>Time per question</h2>
+        <p id="r-seq-note" class="section-note"></p>
+        <div class="chart-wrap" id="r-seq"></div>
+      </div>
       <div class="grid2">
         <div class="card">
           <h2>By operation</h2>

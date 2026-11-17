@@ -582,6 +582,33 @@
     };
   }
 
+  /*
+   * Within one round: does a slow question slow down the next one?
+   * A question is "slow" when it took at least `factor` × the round's median completed time.
+   * Compares the questions straight after slow ones with the round's other completed questions.
+   */
+  function afterSlowEffect(questions, factor) {
+    const k = factor || 2;
+    const ordered = questions.slice().sort((a, b) => a.order - b.order);
+    const med = median(completedOf(ordered).map((q) => q.ms));
+    if (med == null) return null;
+    const threshold = med * k;
+    const isSlow = (q) => q.status === 'completed' && q.ms >= threshold;
+    const after = [];
+    const others = [];
+    ordered.forEach((q, i) => {
+      if (q.status !== 'completed') return;
+      if (i > 0 && isSlow(ordered[i - 1])) after.push(q.ms);
+      else if (!isSlow(q)) others.push(q.ms);
+    });
+    return {
+      median: med, threshold, factor: k,
+      slowCount: ordered.filter(isSlow).length,
+      after: summarize(after),
+      others: summarize(others),
+    };
+  }
+
   function personalBest(sessions, key, excludeId) {
     let best = null;
     for (const s of sessions) {
@@ -788,7 +815,7 @@
     makeId, Round,
     settingsKey, settingsLabel, difficultyLabel, durationLabel, rangeLabel,
     median, summarize, completedOf, unfinishedOf, opBreakdown, mulObservations, pairStats, rankPairs,
-    numberStats, numberBreakdown, personalBest,
+    numberStats, numberBreakdown, personalBest, afterSlowEffect,
     validateSession, toStored, fromStored, exportBackup, parseBackup, fingerprint, Store,
   };
 

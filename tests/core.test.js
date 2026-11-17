@@ -424,3 +424,21 @@ test('settings sanitisation rejects bad values and empty op sets', () => {
   assert.deepEqual(Z.enabledOps(s.ops), Z.OPS);
   assert.deepEqual(s.custom, Z.PRESETS.medium);
 });
+
+test('after-slow effect compares the question after a slow one with the rest of the round', () => {
+  const q = (order, ms, status) => ({ order, op: 'add', left: 2, right: 3, answer: 5, ms, status: status || 'completed' });
+  // Median of completed = 1250 → slow threshold 2500. Slow: #3 (3.0 s) and #6 (2.5 s); #4 and #7 follow them.
+  const qs = [q(1, 1000), q(2, 900), q(3, 3000), q(4, 1800), q(5, 1000), q(6, 2500), q(7, 1400), q(8, 1100), q(9, 40000, 'unfinished')];
+  const e = Z.afterSlowEffect(qs);
+  assert.equal(e.median, 1250);
+  assert.equal(e.threshold, 2500);
+  assert.equal(e.slowCount, 2, 'unfinished questions are never "slow"');
+  assert.deepEqual([e.after.count, e.after.median], [2, 1600]);
+  assert.deepEqual([e.others.count, e.others.median], [4, 1000], 'baseline excludes slow and after-slow questions');
+  // Order comes from `order`, not array position.
+  assert.deepEqual(Z.afterSlowEffect(qs.slice().reverse()).after.median, 1600);
+  // A slow question followed by another slow one counts as "after" (a streak).
+  const streak = Z.afterSlowEffect([q(1, 1000), q(2, 1000), q(3, 5000), q(4, 5000), q(5, 1000)]);
+  assert.deepEqual([streak.slowCount, streak.after.count, streak.after.median], [2, 2, 3000]);
+  assert.equal(Z.afterSlowEffect([q(1, 500, 'unfinished')]), null);
+});

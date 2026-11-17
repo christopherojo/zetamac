@@ -11,7 +11,12 @@ Double-click `index.html` (or drag it into a browser window). Everything runs fr
 - **Ranges** sit inline next to each operation. Choosing Easy, Medium or Hard fills them in. Editing any number switches to Custom and keeps the other values. Choosing Custom again later brings back your last custom ranges.
 - During a round, type answers. A correct answer advances immediately, with no Enter needed. **Esc** abandons the round.
 - **Play again** on the results screen (or Enter) starts another round with the same settings.
-- **Statistics** has history, score trends, per-operation timing, multiplication pair/number analysis, a heatmap, and data controls.
+- **Time per question** on the results screen is a bar chart of every question in order, coloured by operation, with the round median as a dashed line. Hover a bar to see the question. A short summary underneath answers "does a slow question slow me down?":
+  - A question counts as slow if it took at least 2× the round's median.
+  - The summary compares the question right after each slow one with the rest of the round.
+  - Consecutive slow questions count as a streak, so they appear in the "after" group.
+  - The unfinished last question is drawn hatched. If it's far taller than the rest, it is cut off and labelled with its time.
+- **Statistics** has history, score trends, per-operation timing, multiplication pair/number analysis, a heatmap, and data controls. **View** in Session history opens any past round, chart included.
 
 Your last-used settings are remembered.
 

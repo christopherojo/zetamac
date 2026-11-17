@@ -340,8 +340,14 @@
 
   /* ---------------- results ---------------- */
 
-  function renderResults(s, saved) {
+  // opts.review: viewing a past round from Statistics rather than the round just played.
+  function renderResults(s, saved, opts) {
+    const review = !!(opts && opts.review);
     show('results');
+    $('#again-btn').hidden = review;
+    $('#again-hint').hidden = review;
+    $('#change-btn').hidden = review;
+    $('#back-stats-btn').hidden = !review;
     const key = Z.settingsKey(s);
     const completed = Z.completedOf(s.questions);
     const unfinished = Z.unfinishedOf(s.questions);
@@ -353,7 +359,11 @@
 
     const prev = Z.personalBest(state.sessions, key, s.id);
     let pb = '';
-    if (s.status === 'abandoned') pb = prev ? `Personal best for these settings: ${prev.score}` : '';
+    if (review) {
+      const best = Z.personalBest(state.sessions, key);
+      pb = !best ? '' : (s.status === 'completed' && s.score >= best.score)
+        ? '<span class="pb-new">Personal best for these settings.</span>' : `Personal best for these settings: ${best.score}`;
+    } else if (s.status === 'abandoned') pb = prev ? `Personal best for these settings: ${prev.score}` : '';
     else if (!prev) pb = '<span class="pb-new">First completed round with these settings — this is your personal best.</span>';
     else if (s.score > prev.score) pb = `<span class="pb-new">New personal best!</span> Previous best: ${prev.score}`;
     else pb = `Personal best for these settings: ${prev.score}${s.score === prev.score ? ' (tied)' : ''}`;
@@ -368,7 +378,7 @@
       const why = state.storageError ? 'browser storage is unavailable' : (state.lastSaveError ? state.lastSaveError.message : 'unknown error');
       sv.textContent = `✗ Not saved (${why}). Export a backup from Statistics before closing this tab.`;
     }
-    const plan = state.roundMeta && state.roundMeta.plan;
+    const plan = !review && state.roundMeta && state.roundMeta.plan;
     $('#r-note').textContent = plan && plan.fallback ? plan.fallback : '';
 
     const tiles = [
@@ -408,7 +418,110 @@
     ], s.questions, { key: 'order', dir: 'asc', rowClass: (q) => (q.status === 'unfinished' ? 'unfinished' : '') });
 
     // Delay focus slightly so a keystroke typed at the buzzer can't restart instantly.
+    renderQuestionChart(s);
+
+    if (review) { window.scrollTo(0, 0); return; }
     setTimeout(() => { if (state.screen === 'results') $('#again-btn').focus(); }, 600);
+  }
+
+  /* ---------------- per-question timing chart ---------------- */
+
+  function renderQuestionChart(s) {
+    const wrap = $('#r-seq');
+    const note = $('#r-seq-note');
+    const qs = s.questions.slice().sort((a, b) => a.order - b.order);
+    const eff = Z.afterSlowEffect(qs);
+    if (!qs.length || !eff) {
+      note.textContent = 'No completed questions this round, so there is nothing to chart.';
+      wrap.innerHTML = '';
+      return;
+    }
+    const slowWord = plural(eff.slowCount, 'slow question');
+    const def = `at least ${eff.factor}× your median of ${fmtS(eff.median)}`;
+    if (!eff.slowCount) {
+      note.textContent = `No slow questions this round (none took ${def}).`;
+    } else if (!eff.after.count || eff.others.median == null) {
+      note.textContent = `${slowWord} (${def}), but none was followed by a completed question to compare.`;
+    } else {
+      const d = eff.after.median - eff.others.median;
+      const diff = Math.abs(d) < 50 ? 'about the same' : `${fmtS(Math.abs(d))} ${d > 0 ? 'slower' : 'faster'}`;
+      note.textContent = `${slowWord} took ${def}. The question right after one had a median of ${fmtS(eff.after.median)}, ` +
+        `vs ${fmtS(eff.others.median)} for your other questions: ${diff}.` +
+        (eff.after.count < 3 ? ` Only ${plural(eff.after.count, 'case')}, so treat this as a hint.` : '');
+    }
+
+    const W = 800, H = 240, L = 44, R = 12, T = 18, B = 30;
+    const done = Z.completedOf(qs);
+    const maxDone = done.length ? Math.max(...done.map((q) => q.ms)) : Math.max(...qs.map((q) => q.ms));
+    const step = niceStep(maxDone / 1000 / 4) * 1000;
+    const top = Math.ceil((maxDone * 1.05) / step) * step;
+    const base = H - B;
+    // Bars taller than the chart (usually the unfinished last question) are clipped and labelled.
+    const y = (ms) => base - ((H - T - B) * Math.min(ms, top)) / top;
+    const n = qs.length;
+    const slot = (W - L - R) / n;
+    const gap = slot >= 6 ? 2 : slot >= 3 ? 1 : 0;
+    const bw = slot - gap;
+    const r = bw >= 6 ? Math.min(4, bw / 2) : 0;
+    const bar = (x, yTop, w) => (r
+      ? `M${x},${base} V${yTop + r} Q${x},${yTop} ${x + r},${yTop} H${x + w - r} Q${x + w},${yTop} ${x + w},${yTop + r} V${base} Z`
+      : `M${x},${base} V${yTop} H${x + w} V${base} Z`);
+
+    let svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Response time for each question in order">` +
+      '<defs><pattern id="hatch-unf" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
+      '<line x1="0" y1="0" x2="0" y2="6" class="hatch-line"/></pattern></defs>';
+    for (let v = 0; v <= top; v += step) {
+      svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>` +
+        `<text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${(v / 1000).toFixed(step < 1000 ? 1 : 0)}s</text>`;
+    }
+    const labelEvery = [1, 2, 5, 10, 20, 50].find((k) => n / k <= 12) || 100;
+    qs.forEach((q, i) => {
+      const x = L + i * slot + gap / 2;
+      const cls = q.status === 'completed' ? `bar op-${q.op}` : 'bar unfinished';
+      svg += `<path class="${cls}" d="${bar(x, y(q.ms), bw)}"/>`;
+      if (q.ms > top) svg += `<text class="clip" x="${x + bw / 2}" y="${T - 6}" text-anchor="middle">↑${(q.ms / 1000).toFixed(1)}s</text>`;
+      if (q.order === 1 || q.order % labelEvery === 0) svg += `<text x="${x + bw / 2}" y="${H - 12}" text-anchor="middle">${q.order}</text>`;
+    });
+    svg += `<line class="axis" x1="${L}" x2="${W - R}" y1="${base}" y2="${base}"/>`;
+    svg += `<line class="pb" x1="${L}" x2="${W - R}" y1="${y(eff.median)}" y2="${y(eff.median)}"/>` +
+      `<text x="${W - R}" y="${y(eff.median) - 4}" text-anchor="end">median ${fmtS(eff.median)}</text>`;
+    qs.forEach((q, i) => { svg += `<rect class="hit" data-i="${i}" x="${L + i * slot}" y="${T}" width="${slot}" height="${H - T - B}"/>`; });
+    svg += '</svg><div class="tooltip" hidden></div>';
+
+    const present = Z.OPS.filter((op) => done.some((q) => q.op === op));
+    const legend = present.map((op) => `<span><span class="sw op-${op}"></span>${Z.OP_SYMBOL[op]} ${Z.OP_NAME[op]}</span>`).join('') +
+      (qs.some((q) => q.status === 'unfinished') ? '<span><span class="sw unf"></span>unfinished</span>' : '') +
+      '<span><span class="sw dash"></span>round median</span><span class="muted">x-axis: question number</span>';
+    // Scrolls sideways on narrow screens instead of shrinking the labels.
+    wrap.innerHTML = `<div class="chart-scroll">${svg}</div><div class="legend">${legend}</div>`;
+
+    const tip = $('.tooltip', wrap);
+    const svgEl = $('svg', wrap);
+    $$('.hit', wrap).forEach((h) => {
+      h.addEventListener('mouseenter', () => {
+        const i = Number(h.dataset.i);
+        const q = qs[i];
+        const prev = qs[i - 1];
+        const tags = [];
+        if (q.status === 'unfinished') tags.push('unfinished');
+        else if (q.ms >= eff.threshold) tags.push('slow');
+        if (prev && prev.status === 'completed' && prev.ms >= eff.threshold) tags.push('after a slow question');
+        tip.innerHTML = `<b>#${q.order}</b> · <span class="mono">${esc(qText(q))} = ${q.answer}</span><br>${fmtS(q.ms)}` +
+          (tags.length ? ` · ${tags.join(' · ')}` : '');
+        tip.hidden = false;
+        const box = svgEl.getBoundingClientRect();
+        const px = ((L + (i + 0.5) * slot) / W) * box.width;
+        const py = (y(q.ms) / H) * box.height;
+        tip.style.left = Math.min(box.width - 200, Math.max(0, px - 80)) + 'px';
+        tip.style.top = Math.max(0, py - 56) + 'px';
+      });
+      h.addEventListener('mouseleave', () => { tip.hidden = true; });
+    });
+  }
+
+  function openRound(id) {
+    const s = state.sessions.find((x) => x.id === id);
+    if (s) renderResults(s, !state.unsaved.has(id), { review: true });
   }
 
   /* ---------------- sortable table ---------------- */
@@ -535,7 +648,12 @@
         render: (s) => fmtS(Z.summarize(Z.completedOf(s.questions).map((q) => q.ms)).median), defaultDir: 'desc' },
       { key: 'status', label: 'Status', cls: 'l', value: (s) => s.status,
         render: (s) => (s.status === 'abandoned' ? '<span class="tag warn">abandoned</span>' : 'completed') + (state.unsaved.has(s.id) ? ' <span class="tag warn">unsaved</span>' : '') },
-    ], sessions, { key: 'date', dir: 'desc', scroll: true });
+      { key: 'view', label: 'Round', value: (s) => s.startedAt,
+        render: (s) => `<button type="button" class="small ghost" data-view="${esc(s.id)}">View</button>` },
+    ], sessions, {
+      key: 'date', dir: 'desc', scroll: true,
+      onDraw: (c) => $$('[data-view]', c).forEach((b) => { b.onclick = () => openRound(b.dataset.view); }),
+    });
 
     const br = Z.opBreakdown(questions);
     const unf = {};
@@ -903,6 +1021,7 @@
 
     $('#again-btn').addEventListener('click', startRound);
     $('#change-btn').addEventListener('click', () => show('setup'));
+    $('#back-stats-btn').addEventListener('click', () => show('stats'));
     $$('.nav-btn').forEach((b) => b.addEventListener('click', () => show(b.dataset.nav)));
 
     ['#f-mode', '#f-settings', '#f-diff', '#f-op', '#f-from', '#f-to', '#f-abandoned'].forEach((id) => $(id).addEventListener('change', renderStats));
