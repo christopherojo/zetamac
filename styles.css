@@ -370,3 +370,46 @@ td.hm-low { background-image: repeating-linear-gradient(45deg, var(--hatch) 0 1p
 .legend .sw.dash { height: 0; border-top: 1px dashed var(--ink-2); border-radius: 0; }
 .legend .sw.low { background-color: var(--seq-5); background-image: repeating-linear-gradient(45deg, var(--hatch) 0 1px, transparent 1px 7px); }
 .data-controls .buttons { margin: 8px 0; }
+
+/* ---------- warm-up ---------- */
+.phase-row {
+  display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 6px 12px;
+  padding: 10px 0; border-bottom: 1px solid var(--line);
+}
+.phase-num {
+  width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  background: var(--surface); border: 1px solid var(--control); font-weight: 650; font-size: 0.85rem;
+}
+.phase-text b { display: block; font-weight: 600; }
+.phase-text small { color: var(--muted); font-size: 0.82rem; }
+.phase-ctl { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 0.88rem; }
+.phase-split { grid-column: 2 / -1; max-width: 360px; }
+.phase-split span { min-height: 36px; font-size: 0.88rem; }
+.feedback-seg { flex: 1; max-width: 360px; }
+.feedback-seg span { min-height: 36px; }
+.feedback-hint { margin: 6px 0 0; }
+.check-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-weight: 550; cursor: pointer; }
+.check-row input { width: 17px; height: 17px; margin: 0; }
+
+.warm-bar { margin: 18px 0 0; }
+.warm-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; color: var(--ink-2); font-weight: 550; }
+.warm-track { position: relative; height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.warm-track #warm-progress { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); }
+.warm-track .mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--surface); }
+.pace { display: inline-flex; align-items: center; gap: 8px; font-size: 0.9rem; }
+.pace .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--axis); }
+.pace.on .dot { background: var(--good); }
+.pace.on .pace-text { color: var(--ink); }
+
+.countdown { text-align: center; margin: 14vh 0 10vh; }
+.count-label { color: var(--ink-2); font-size: 1.1rem; }
+.count-n { font-family: var(--mono); font-size: clamp(4rem, 14vw, 7rem); font-weight: 700; line-height: 1.1; }
+
+.chart .phase-line { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 2 3; }
+.chart .phase-label { fill: var(--ink-2); font-weight: 600; }
+
+@media (max-width: 640px) {
+  .seg-mode { grid-template-columns: 1fr; }
+  .phase-row { grid-template-columns: 28px 1fr; }
+  .phase-ctl, .phase-split { grid-column: 2 / -1; }
+}

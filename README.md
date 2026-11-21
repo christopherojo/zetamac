@@ -6,8 +6,8 @@ Offline Zetamac-style arithmetic practice that records how long every question t
 
 Double-click `index.html` (or drag it into a browser window). Everything runs from the file. No internet connection is needed.
 
-- **Practice**: pick Standard or Targeted practice, a difficulty, operations and a duration (Bullet 1 min, Blitz 2 min, Rapid 3 min). Press **Enter** or **Start**.
-- **Operations** are chosen separately for Standard and Targeted practice, so changing one doesn't change the other.
+- **Practice**: pick Standard, Targeted practice or Warm-up, a difficulty, operations and a duration (Bullet 1 min, Blitz 2 min, Rapid 3 min). Press **Enter** or **Start**.
+- **Operations** are chosen separately for Targeted practice. Standard rounds and warm-ups share one set of operations.
 - **Ranges** sit inline next to each operation. Choosing Easy, Medium or Hard fills them in. Editing any number switches to Custom and keeps the other values. Choosing Custom again later brings back your last custom ranges.
 - During a round, type answers. A correct answer advances immediately, with no Enter needed. **Esc** abandons the round.
 - **Play again** on the results screen (or Enter) starts another round with the same settings.
@@ -89,6 +89,29 @@ There are three focuses:
 - An operation with fewer than 3 qualifying problems gets random questions, and the setup screen says which operations those are. If no selected operation has enough history, the whole round is random practice.
 
 Targeted rounds keep their own history and personal bests, separate from standard rounds. Targeted rounds saved before this change (multiplication only) still compare with new multiplication-only targeted rounds.
+
+### Warm-up
+
+A short, unscored warm-up before a real round. It runs three phases back to back:
+
+1. **Easy fluency** (default 30 s): mixed operations one step easier than your test ranges. Hard warms up on Medium, Medium on Easy, and Easy on Easy halved (2–30 + 2–30, 2–12 × 2–10).
+2. **One operation at a time** (default 1 min): short blocks of each selected operation at your test ranges.
+   - **Even** gives each operation the same time.
+   - **Favour slower ops** gives each operation 10 s, then shares the rest in proportion to your median time for it. This needs 20 answers per operation in your history; until then it uses Even and says so.
+3. **Test conditions** (default 30 s): mixed operations at your test ranges and full speed.
+
+Each phase can be set from Off up to 2 min in 15 s steps. The other settings:
+
+- **Feedback**:
+  - **Quiet** shows the phase and a progress bar.
+  - **Pace** adds a dot that turns green when at least 2 of your last 3 answers beat your usual time for that operation.
+  - **Full** also shows the timer and count.
+- **Then start a real round** (off by default): when the warm-up ends, a 3-second countdown starts a Standard round with your settings. **Tab** skips straight to it (or ends the warm-up when this is off). **Esc** cancels.
+- **Without it:** the warm-up's results offer **Start real round**.
+
+Warm-ups are saved with their timings and the phase of each question. They are never counted in personal bests, score trends, targeted practice's slowest problems, or the default statistics; pick **Warm-ups** in the Mode filter to see them.
+
+Standard rounds started within 10 minutes of a completed warm-up are tagged **warmed up**. Once a settings group has 5 warmed-up and 5 cold rounds, its score trend compares the two: median score, and median time over the first 10 questions.
 
 ## Tests
 

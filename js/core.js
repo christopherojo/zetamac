@@ -25,6 +25,15 @@
   const SLOWEST_POOL_SIZE = 15;
   const MIN_SLOWEST_PAIRS = 3;
 
+  const WARMUP_PHASE1 = ['easier', 'easy', 'medium', 'hard', 'same'];
+  const WARMUP_SPLITS = ['even', 'slower'];
+  const WARMUP_FEEDBACK = ['quiet', 'pace', 'full'];
+  const WARMUP_PHASE_MAX = 120; // seconds per phase
+  const WARMUP_STEP = 15;
+  const WARMUP_SPLIT_MIN_SAMPLES = 20;
+  const WARMUP_BLOCK_FLOOR = 10; // seconds each operation gets in phase 2 when favouring slower ones
+  const WARMUP_TAG_WINDOW = 10 * 60 * 1000; // a standard round this soon after a warm-up counts as warmed up
+
   const BACKUP_FORMAT = 'zetamac-local-backup';
   const BACKUP_VERSION = 1;
   const SESSION_PREFIX = 'zetamac.session.';
@@ -48,6 +57,13 @@
         partner: [2, 12],
         randomPct: 25,
         ops: { add: true, sub: true, mul: true, div: true },
+      },
+      warmup: {
+        phases: [30, 60, 30],
+        phase1: 'easier',
+        split: 'even',
+        feedback: 'pace',
+        continue: false,
       },
     };
   }
@@ -79,7 +95,7 @@
   function sanitizeSettings(raw) {
     const s = defaultSettings();
     if (!raw || typeof raw !== 'object') return s;
-    if (raw.mode === 'standard' || raw.mode === 'targeted') s.mode = raw.mode;
+    if (['standard', 'targeted', 'warmup'].includes(raw.mode)) s.mode = raw.mode;
     if (DIFFICULTIES.includes(raw.difficulty)) s.difficulty = raw.difficulty;
     if (validRanges(raw.custom)) s.custom = clone(raw.custom);
     if (DURATIONS[raw.duration]) s.duration = Number(raw.duration);
@@ -100,6 +116,15 @@
         OPS.forEach((o) => { ops[o] = !!t.ops[o]; });
         if (enabledOps(ops).length) s.targeted.ops = ops;
       }
+    }
+    const w = raw.warmup;
+    if (w && typeof w === 'object') {
+      if (Array.isArray(w.phases) && w.phases.length === 3 && w.phases.some((x) => x > 0) &&
+        w.phases.every((x) => isInt(x) && x >= 0 && x <= WARMUP_PHASE_MAX && x % WARMUP_STEP === 0)) s.warmup.phases = w.phases.slice();
+      if (WARMUP_PHASE1.includes(w.phase1)) s.warmup.phase1 = w.phase1;
+      if (WARMUP_SPLITS.includes(w.split)) s.warmup.split = w.split;
+      if (WARMUP_FEEDBACK.includes(w.feedback)) s.warmup.feedback = w.feedback;
+      if (typeof w.continue === 'boolean') s.warmup.continue = w.continue;
     }
     return s;
   }
@@ -320,6 +345,130 @@
     return { next, fallback, randomOps, pools };
   }
 
+  /* ---------------- warm-up ---------------- */
+
+  const halfRange = (r) => [r[0], Math.max(r[0], Math.ceil(r[1] / 2))];
+
+  // One step easier per operation family: Hard → Medium, Medium → Easy, otherwise halve
+  // the addition ranges and the second multiplication factor (Easy → 2–30 + 2–30, 2–12 × 2–10).
+  function easierFamily(fam, pair) {
+    if (samePair(pair, PRESETS.hard[fam])) return clone(PRESETS.medium[fam]);
+    if (samePair(pair, PRESETS.medium[fam])) return clone(PRESETS.easy[fam]);
+    return fam === 'add' ? [halfRange(pair[0]), halfRange(pair[1])] : [pair[0].slice(), halfRange(pair[1])];
+  }
+
+  function easierRanges(ranges) {
+    return { add: easierFamily('add', ranges.add), mul: easierFamily('mul', ranges.mul) };
+  }
+
+  function phase1RangesFor(choice, testRanges) {
+    if (choice === 'same') return clone(testRanges);
+    if (PRESETS[choice]) return clone(PRESETS[choice]);
+    return easierRanges(testRanges);
+  }
+
+  // Median completed time and sample count per operation.
+  function opMedians(questions) {
+    const out = {};
+    OPS.forEach((op) => {
+      const times = questions.filter((q) => q.op === op && q.status === 'completed').map((q) => q.ms);
+      if (times.length) out[op] = { median: median(times), count: times.length };
+    });
+    return out;
+  }
+
+  /*
+   * Phase 2 time per operation. "even" splits equally. "slower" gives every operation
+   * WARMUP_BLOCK_FLOOR seconds, then shares the rest in proportion to its median time,
+   * falling back to even when history or the phase length is too small.
+   */
+  function splitPhase2(ops, seconds, split, history) {
+    if (!seconds || !ops.length) return { blocks: [], weighted: false, fallback: null };
+    let fallback = null;
+    if (split === 'slower' && ops.length > 1) {
+      const meds = opMedians(history);
+      const short = ops.filter((op) => !meds[op] || meds[op].count < WARMUP_SPLIT_MIN_SAMPLES);
+      if (short.length) {
+        fallback = `Even split for now: favouring slower operations needs ${WARMUP_SPLIT_MIN_SAMPLES} answers per operation ` +
+          `(${short.map((op) => `${OP_SYMBOL[op]} has ${meds[op] ? meds[op].count : 0}`).join(', ')}).`;
+      } else if (seconds < WARMUP_BLOCK_FLOOR * ops.length) {
+        fallback = `Even split: phase 2 needs at least ${WARMUP_BLOCK_FLOOR * ops.length} s to favour slower operations.`;
+      } else {
+        const total = ops.reduce((t, op) => t + meds[op].median, 0);
+        const spare = (seconds - WARMUP_BLOCK_FLOOR * ops.length) * 1000;
+        return {
+          blocks: ops.map((op) => ({ op, ms: WARMUP_BLOCK_FLOOR * 1000 + (spare * meds[op].median) / total })),
+          weighted: true, fallback: null,
+        };
+      }
+    }
+    return { blocks: ops.map((op) => ({ op, ms: (seconds * 1000) / ops.length })), weighted: false, fallback };
+  }
+
+  /*
+   * Question source for a warm-up. Phases run back to back by elapsed time:
+   *   1 – mixed operations on the phase 1 ranges,
+   *   2 – one operation at a time on the test ranges (blocks from splitPhase2),
+   *   3 – mixed operations on the test ranges.
+   * A question already on screen at a phase boundary stays until answered.
+   */
+  function buildWarmupPlan(cfg, testRanges, ops, history) {
+    const p1Ranges = phase1RangesFor(cfg.phase1, testRanges);
+    const split = splitPhase2(ops, cfg.phases[1], cfg.split, history);
+    const b1 = cfg.phases[0] * 1000;
+    const b2 = b1 + cfg.phases[1] * 1000;
+    const total = b2 + cfg.phases[2] * 1000;
+
+    function phaseAt(elapsed) {
+      if (elapsed < b1) return { phase: 1 };
+      if (elapsed < b2) {
+        let t = elapsed - b1;
+        for (const b of split.blocks) {
+          if (t < b.ms) return { phase: 2, op: b.op };
+          t -= b.ms;
+        }
+        return { phase: 2, op: split.blocks[split.blocks.length - 1].op };
+      }
+      return { phase: 3 };
+    }
+
+    function next(elapsed, rng) {
+      const p = phaseAt(elapsed);
+      let q;
+      if (p.phase === 1) q = generateStandard(p1Ranges, ops, rng);
+      else if (p.phase === 2) q = generateStandard(testRanges, [p.op], rng);
+      else q = generateStandard(testRanges, ops, rng);
+      q.phase = p.phase;
+      return q;
+    }
+
+    return { phase1Ranges: p1Ranges, blocks: split.blocks, weighted: split.weighted, fallback: split.fallback,
+      bounds: [b1, b2, total], total, phaseAt, next };
+  }
+
+  // The most recent completed warm-up that ended within WARMUP_TAG_WINDOW of `now`, as a tag.
+  function warmupTagFor(sessions, now) {
+    let last = null;
+    for (const s of sessions) {
+      if (s.mode !== 'warmup' || s.status !== 'completed' || !s.endedAt || s.endedAt > now) continue;
+      if (!last || s.endedAt > last.endedAt) last = s;
+    }
+    if (!last || now - last.endedAt > WARMUP_TAG_WINDOW) return null;
+    return { warmupId: last.id, gapSec: Math.round((now - last.endedAt) / 1000) };
+  }
+
+  // Completed standard rounds with one settings key, split by whether they followed a warm-up.
+  function warmColdComparison(sessions, key) {
+    const group = (warm) => {
+      const list = sessions.filter((s) => s.mode === 'standard' && s.status === 'completed' &&
+        settingsKey(s) === key && !!s.warmedUp === warm);
+      const first = [];
+      list.forEach((s) => s.questions.forEach((q) => { if (q.order <= 10 && q.status === 'completed') first.push(q.ms); }));
+      return { n: list.length, medianScore: median(list.map((s) => s.score)), first10Median: median(first) };
+    };
+    return { warm: group(true), cold: group(false) };
+  }
+
   /* ---------------- round engine ---------------- */
 
   function makeId() {
@@ -343,7 +492,7 @@
       this.state = 'ready';
       this.score = 0;
       this.records = [];
-      this.current = opts.nextQuestion();
+      this.current = opts.nextQuestion(0);
       this.deadline = null;
     }
 
@@ -374,7 +523,7 @@
       if (!checkAnswer(value, q.answer)) return 'pending';
       this.records.push(this._record(q, now - q.shownAt, 'completed'));
       this.score++;
-      this.current = this.opts.nextQuestion();
+      this.current = this.opts.nextQuestion(now - this.startTime);
       this.current.shownAt = now;
       return 'correct';
     }
@@ -383,15 +532,17 @@
       const r = { order: this.records.length + 1, op: q.op, left: q.left, right: q.right, answer: q.answer,
         ms: Math.max(0, Math.round(ms)), status };
       if (q.source) r.source = q.source;
+      if (q.phase) r.phase = q.phase;
       return r;
     }
 
     // Ends the round and returns the session exactly once (null afterwards).
+    // reason: 'completed' (time ran out), 'abandoned', or 'ended' (stopped early but kept, e.g. a skipped warm-up).
     finish(now, reason) {
       if (this.state !== 'running') return null;
       this.state = 'ended';
       const abandoned = reason === 'abandoned';
-      const end = abandoned ? Math.min(now, this.deadline) : this.deadline;
+      const end = reason === 'completed' ? this.deadline : Math.min(now, this.deadline);
       this.records.push(this._record(this.current, end - this.current.shownAt, 'unfinished'));
       const o = this.opts;
       const session = {
@@ -406,7 +557,10 @@
         status: abandoned ? 'abandoned' : 'completed',
         questions: this.records,
       };
+      session.endedAt = Math.round(o.startedAt + (end - this.startTime));
       if (o.target) session.target = clone(o.target);
+      if (o.warmup) session.warmup = clone(o.warmup);
+      if (o.warmedUp) session.warmedUp = clone(o.warmedUp);
       return session;
     }
   }
@@ -424,6 +578,14 @@
   // Sessions are only compared when this key matches.
   function settingsKey(s) {
     const mul = `mul:${rangeStr(s.ranges.mul[0])},${rangeStr(s.ranges.mul[1])}`;
+    if (s.mode === 'warmup') {
+      const w = s.warmup;
+      const ops = OPS.filter((o) => s.ops.includes(o));
+      const parts = ['warmup', w.phases.join('/'), w.phase1, w.split, ops.join('+')];
+      if (usesAdd(ops)) parts.push(`add:${rangeStr(s.ranges.add[0])},${rangeStr(s.ranges.add[1])}`);
+      if (usesMul(ops)) parts.push(mul);
+      return parts.join('|');
+    }
     if (s.mode === 'targeted') {
       const t = s.target || { focus: 'slowest', randomPct: 0 };
       let detail = 'slowest';
@@ -463,6 +625,14 @@
   }
 
   function settingsLabel(s) {
+    if (s.mode === 'warmup') {
+      const ops = OPS.filter((o) => s.ops.includes(o));
+      const total = s.warmup.phases.reduce((a, b) => a + b, 0);
+      const m = Math.floor(total / 60);
+      const sec = total % 60;
+      return `Warm-up · ${m}:${String(sec).padStart(2, '0')} (${s.warmup.phases.join(' / ')} s) · ` +
+        `${difficultyLabel(s.ranges, ops)} · ${ops.map((o) => OP_SYMBOL[o]).join(' ')}`;
+    }
     if (s.mode === 'targeted') {
       const t = s.target || {};
       const ops = OPS.filter((o) => s.ops.includes(o));
@@ -634,6 +804,7 @@
     if (q.status !== 'completed' && q.status !== 'unfinished') throw new Error('bad question status');
     const out = { op: q.op, left: q.left, right: q.right, answer: q.answer, ms: Math.round(q.ms), status: q.status };
     if (q.source === 'target' || q.source === 'random') out.source = q.source;
+    if (q.phase === 1 || q.phase === 2 || q.phase === 3) out.phase = q.phase;
     return out;
   }
 
@@ -643,7 +814,7 @@
     if (typeof x.id !== 'string' || !/^[\w-]{1,100}$/.test(x.id)) throw new Error('bad id');
     const startedAt = typeof x.startedAt === 'string' ? Date.parse(x.startedAt) : x.startedAt;
     if (typeof startedAt !== 'number' || !isFinite(startedAt)) throw new Error('bad timestamp');
-    if (x.mode !== 'standard' && x.mode !== 'targeted') throw new Error('bad mode');
+    if (!['standard', 'targeted', 'warmup'].includes(x.mode)) throw new Error('bad mode');
     if (!DIFFICULTIES.includes(x.difficulty)) throw new Error('bad difficulty');
     if (!validRanges(x.ranges)) throw new Error('bad ranges');
     if (!Array.isArray(x.ops) || !x.ops.length || !x.ops.every((o) => OPS.includes(o))) throw new Error('bad ops');
@@ -676,17 +847,44 @@
         s.target.pairs = t.pairs.map((p) => p.slice());
       }
     }
+    if (x.mode === 'warmup') {
+      const w = x.warmup;
+      if (!w || !Array.isArray(w.phases) || w.phases.length !== 3 || !w.phases.some((v) => v > 0) ||
+        !w.phases.every((v) => isInt(v) && v >= 0 && v <= WARMUP_PHASE_MAX)) throw new Error('bad warm-up phases');
+      if (!WARMUP_PHASE1.includes(w.phase1) || !WARMUP_SPLITS.includes(w.split) || !WARMUP_FEEDBACK.includes(w.feedback)) {
+        throw new Error('bad warm-up settings');
+      }
+      if (!validRanges(w.phase1Ranges)) throw new Error('bad warm-up ranges');
+      s.warmup = {
+        phases: w.phases.slice(), phase1: w.phase1, split: w.split, feedback: w.feedback, continue: !!w.continue,
+        phase1Ranges: clone(w.phase1Ranges),
+        blocks: Array.isArray(w.blocks)
+          ? w.blocks.filter((b) => b && OPS.includes(b.op) && typeof b.ms === 'number' && b.ms >= 0).map((b) => ({ op: b.op, ms: Math.round(b.ms) }))
+          : [],
+      };
+    }
+    if (x.endedAt != null) {
+      const e = typeof x.endedAt === 'string' ? Date.parse(x.endedAt) : x.endedAt;
+      if (typeof e !== 'number' || !isFinite(e) || e < startedAt) throw new Error('bad end time');
+      s.endedAt = e;
+    }
+    if (x.warmedUp != null) {
+      const w = x.warmedUp;
+      if (!w || typeof w.warmupId !== 'string' || !isInt(w.gapSec) || w.gapSec < 0) throw new Error('bad warm-up tag');
+      s.warmedUp = { warmupId: w.warmupId, gapSec: w.gapSec };
+    }
     return s;
   }
 
-  // Compact form for localStorage: questions as [opCode, left, right, answer, ms, done, source?].
+  // Compact form for localStorage: questions as [opCode, left, right, answer, ms, done, source?, phase?].
   function toStored(s) {
     return {
       v: 1, id: s.id, t: s.startedAt, m: s.mode, d: s.difficulty, r: s.ranges, o: s.ops, dur: s.duration,
-      sc: s.score, st: s.status, tg: s.target,
+      sc: s.score, st: s.status, tg: s.target, e: s.endedAt, w: s.warmup, wu: s.warmedUp,
       q: s.questions.map((q) => {
         const row = [OP_CODE[q.op], q.left, q.right, q.answer, q.ms, q.status === 'completed' ? 1 : 0];
-        if (q.source) row.push(q.source === 'target' ? 't' : 'r');
+        if (q.source || q.phase) row.push(q.source ? (q.source === 'target' ? 't' : 'r') : 0);
+        if (q.phase) row.push(q.phase);
         return row;
       }),
     };
@@ -696,11 +894,12 @@
     if (!o || o.v !== 1 || !Array.isArray(o.q)) throw new Error('unknown stored format');
     return validateSession({
       id: o.id, startedAt: o.t, mode: o.m, difficulty: o.d, ranges: o.r, ops: o.o, duration: o.dur,
-      score: o.sc, status: o.st, target: o.tg,
+      score: o.sc, status: o.st, target: o.tg, endedAt: o.e, warmup: o.w, warmedUp: o.wu,
       questions: o.q.map((row) => {
         const q = { op: CODE_OP[row[0]], left: row[1], right: row[2], answer: row[3], ms: row[4],
           status: row[5] === 1 ? 'completed' : 'unfinished' };
         if (row[6]) q.source = row[6] === 't' ? 'target' : 'random';
+        if (row[7]) q.phase = row[7];
         return q;
       }),
     });
@@ -714,6 +913,7 @@
       settings,
       sessions: sessions.slice().sort((a, b) => a.startedAt - b.startedAt).map((s) => {
         const out = Object.assign({}, s, { startedAt: new Date(s.startedAt).toISOString() });
+        if (s.endedAt) out.endedAt = new Date(s.endedAt).toISOString();
         out.questions = s.questions.map((q) => Object.assign({ sessionId: s.id }, q));
         return out;
       }),
@@ -812,6 +1012,9 @@
     randInt, makeQuestion, generateStandard, checkAnswer,
     parseNumbers, parsePairs, pairKey, targetConfig, buildTargetPlan,
     problemKey, problemFits, problemStats, slowestCandidates, operandsOf,
+    WARMUP_PHASE1, WARMUP_SPLITS, WARMUP_FEEDBACK, WARMUP_PHASE_MAX, WARMUP_STEP, WARMUP_SPLIT_MIN_SAMPLES,
+    WARMUP_BLOCK_FLOOR, WARMUP_TAG_WINDOW,
+    easierRanges, phase1RangesFor, opMedians, splitPhase2, buildWarmupPlan, warmupTagFor, warmColdComparison,
     makeId, Round,
     settingsKey, settingsLabel, difficultyLabel, durationLabel, rangeLabel,
     median, summarize, completedOf, unfinishedOf, opBreakdown, mulObservations, pairStats, rankPairs,

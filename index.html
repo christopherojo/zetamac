@@ -28,10 +28,46 @@
 
         <fieldset class="group">
           <legend>Mode</legend>
-          <div class="seg seg-2">
+          <div class="seg seg-3 seg-mode">
             <label><input type="radio" name="mode" value="standard"><span><b>Standard</b><small>Mixed operations, Zetamac rules</small></span></label>
             <label><input type="radio" name="mode" value="targeted"><span><b>Targeted practice</b><small>Drill your slowest problems or chosen numbers</small></span></label>
+            <label><input type="radio" name="mode" value="warmup"><span><b>Warm-up</b><small>Ease in before a real round</small></span></label>
           </div>
+        </fieldset>
+
+        <fieldset id="warmup-panel" class="group targeted" hidden>
+          <legend>Warm-up phases</legend>
+          <div class="phase-row">
+            <span class="phase-num">1</span>
+            <div class="phase-text"><b>Easy fluency</b><small>Mixed operations, one step easier than your test ranges</small></div>
+            <label class="phase-ctl">Length <select id="w-p1"><option value="0">Off</option><option value="15">15 s</option><option value="30">30 s</option><option value="45">45 s</option><option value="60">1 min</option><option value="75">1 min 15 s</option><option value="90">1 min 30 s</option><option value="105">1 min 45 s</option><option value="120">2 min</option></select></label>
+          </div>
+          <div class="phase-row">
+            <span class="phase-num">2</span>
+            <div class="phase-text"><b>One operation at a time</b><small>Short blocks of each operation at test ranges</small></div>
+            <label class="phase-ctl">Length <select id="w-p2"><option value="0">Off</option><option value="15">15 s</option><option value="30">30 s</option><option value="45">45 s</option><option value="60">1 min</option><option value="75">1 min 15 s</option><option value="90">1 min 30 s</option><option value="105">1 min 45 s</option><option value="120">2 min</option></select></label>
+            <div class="seg seg-2 phase-split" role="radiogroup" aria-label="Phase 2 split">
+              <label><input type="radio" name="wsplit" value="even"><span>Even</span></label>
+              <label><input type="radio" name="wsplit" value="slower"><span>Favour slower ops</span></label>
+            </div>
+          </div>
+          <div class="phase-row">
+            <span class="phase-num">3</span>
+            <div class="phase-text"><b>Test conditions</b><small>Mixed operations at test ranges and full speed</small></div>
+            <label class="phase-ctl">Length <select id="w-p3"><option value="0">Off</option><option value="15">15 s</option><option value="30">30 s</option><option value="45">45 s</option><option value="60">1 min</option><option value="75">1 min 15 s</option><option value="90">1 min 30 s</option><option value="105">1 min 45 s</option><option value="120">2 min</option></select></label>
+          </div>
+          <div class="inline-row">
+            <label>Feedback</label>
+            <div class="seg seg-3 feedback-seg">
+              <label><input type="radio" name="wfeedback" value="quiet"><span>Quiet</span></label>
+              <label><input type="radio" name="wfeedback" value="pace"><span>Pace</span></label>
+              <label><input type="radio" name="wfeedback" value="full"><span>Full</span></label>
+            </div>
+          </div>
+          <p id="feedback-hint" class="muted small feedback-hint"></p>
+          <label class="check-row"><input type="checkbox" id="w-continue"><span>Then start a real round <span class="muted">(Standard, with the settings below)</span></span></label>
+          <p id="warmup-summary" class="hint"></p>
+          <div id="warmup-notice"></div>
         </fieldset>
 
         <fieldset id="targeted-panel" class="group targeted" hidden>
@@ -107,7 +143,7 @@
         </fieldset>
 
         <fieldset class="group">
-          <legend>Duration</legend>
+          <legend id="duration-legend">Duration</legend>
           <div class="seg seg-3">
             <label><input type="radio" name="duration" value="60"><span>Bullet · 1 min</span></label>
             <label><input type="radio" name="duration" value="120"><span>Blitz · 2 min</span></label>
@@ -127,10 +163,22 @@
     <!-- ============ GAME ============ -->
     <section id="screen-game" class="screen game" hidden>
       <div class="game-bar">
-        <div class="clock">Seconds left: <strong id="time-left">120</strong></div>
-        <div class="score">Score: <strong id="score">0</strong></div>
+        <div class="clock" id="clock-box">Seconds left: <strong id="time-left">120</strong></div>
+        <div class="score" id="score-box">Score: <strong id="score">0</strong></div>
       </div>
-      <div class="problem-wrap">
+      <div id="warm-bar" class="warm-bar" hidden>
+        <div class="warm-top">
+          <span id="warm-phase"></span>
+          <span id="warm-pace" class="pace" hidden><span class="dot"></span><span class="pace-text"></span></span>
+        </div>
+        <div class="warm-track"><span id="warm-progress"></span><i class="mark" id="warm-mark1"></i><i class="mark" id="warm-mark2"></i></div>
+      </div>
+      <div id="countdown" class="countdown" hidden>
+        <div class="count-label">Real round in</div>
+        <div id="count-n" class="count-n">3</div>
+        <div id="count-sub" class="muted small"></div>
+      </div>
+      <div class="problem-wrap" id="problem-wrap">
         <div class="problem" id="problem" aria-live="off"></div>
         <span class="eq">=</span>
         <input id="answer" class="answer" type="text" inputmode="numeric" pattern="[0-9]*"
@@ -138,7 +186,10 @@
       </div>
       <div class="game-foot">
         <span id="game-label" class="muted small"></span>
-        <button type="button" id="abandon-btn" class="ghost small">Abandon round (Esc)</button>
+        <span class="buttons">
+          <button type="button" id="skip-btn" class="ghost small" hidden></button>
+          <button type="button" id="abandon-btn" class="ghost small">Abandon round (Esc)</button>
+        </span>
       </div>
     </section>
 
@@ -192,9 +243,10 @@
       <div class="card filters">
         <label>Mode
           <select id="f-mode">
-            <option value="all">All modes</option>
+            <option value="all">Standard + targeted</option>
             <option value="standard">Standard</option>
             <option value="targeted">Targeted</option>
+            <option value="warmup">Warm-ups</option>
           </select>
         </label>
         <label>Settings

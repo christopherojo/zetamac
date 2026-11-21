@@ -117,6 +117,11 @@
     s.targeted.partner = [Number($('#t-partner-min').value), Number($('#t-partner-max').value)];
     const pct = Number($('#t-random').value);
     s.targeted.randomPct = Number.isInteger(pct) ? Math.min(50, Math.max(0, pct)) : 25;
+    const w = s.warmup;
+    w.phases = ['#w-p1', '#w-p2', '#w-p3'].map((id) => Number($(id).value));
+    w.split = f.querySelector('input[name=wsplit]:checked').value;
+    w.feedback = f.querySelector('input[name=wfeedback]:checked').value;
+    w.continue = $('#w-continue').checked;
   }
 
   function fillSetupForm() {
@@ -133,9 +138,13 @@
     $('#t-partner-min').value = s.targeted.partner[0];
     $('#t-partner-max').value = s.targeted.partner[1];
     $('#t-random').value = s.targeted.randomPct;
+    ['#w-p1', '#w-p2', '#w-p3'].forEach((id, i) => { $(id).value = String(s.warmup.phases[i]); });
+    f.querySelector(`input[name=wsplit][value=${s.warmup.split}]`).checked = true;
+    f.querySelector(`input[name=wfeedback][value=${s.warmup.feedback}]`).checked = true;
+    $('#w-continue').checked = s.warmup.continue;
   }
 
-  // Standard and targeted rounds keep separate operation choices.
+  // Targeted practice keeps its own operation choices; standard rounds and warm-ups share theirs.
   function activeOps() {
     const s = state.settings;
     return s.mode === 'targeted' ? s.targeted.ops : s.ops;
@@ -169,15 +178,28 @@
     renderSetup();
   }
 
-  // Returns { config } for a startable round or { error }.
-  function buildRoundConfig() {
+  // Returns { config } for a startable round or { error }. modeOverride starts a mode other than
+  // the selected one (the real round after a warm-up is always a standard round).
+  function buildRoundConfig(modeOverride) {
     const s = state.settings;
+    const mode = modeOverride || s.mode;
     const ranges = Z.rangesFor(s);
     if (!Z.validRanges(ranges)) return { error: 'Each range needs whole numbers from 1 upward, with min ≤ max.' };
-    const ops = Z.enabledOps(activeOps());
+    const ops = Z.enabledOps(mode === 'targeted' ? s.targeted.ops : s.ops);
     if (!ops.length) return { error: 'Choose at least one operation.' };
-    if (s.mode === 'standard') {
+    if (mode === 'standard') {
       return { config: { mode: 'standard', difficulty: s.difficulty, ranges, ops, duration: s.duration } };
+    }
+    if (mode === 'warmup') {
+      const total = s.warmup.phases.reduce((a, b) => a + b, 0);
+      if (!total) return { error: 'Turn on at least one warm-up phase.' };
+      const plan = Z.buildWarmupPlan(s.warmup, ranges, ops, historyQuestions());
+      const warmup = {
+        phases: s.warmup.phases.slice(), phase1: s.warmup.phase1, split: s.warmup.split, feedback: s.warmup.feedback,
+        continue: s.warmup.continue, phase1Ranges: plan.phase1Ranges,
+        blocks: plan.blocks.map((b) => ({ op: b.op, ms: Math.round(b.ms) })),
+      };
+      return { config: { mode: 'warmup', difficulty: s.difficulty, ranges, ops, duration: total, warmup }, plan };
     }
     let target;
     try { target = Z.targetConfig(s.targeted); } catch (e) { return { error: e.message }; }
@@ -185,17 +207,21 @@
     return { config: { mode: 'targeted', difficulty: s.difficulty, ranges, ops, duration: s.duration, target }, plan };
   }
 
-  // Every question (completed or unfinished) from completed rounds, standard and targeted.
+  // Every question (completed or unfinished) from completed standard and targeted rounds (never warm-ups).
   function historyQuestions() {
     const qs = [];
-    state.sessions.forEach((s) => { if (s.status === 'completed') qs.push(...s.questions); });
+    state.sessions.forEach((s) => { if (s.status === 'completed' && s.mode !== 'warmup') qs.push(...s.questions); });
     return qs;
   }
 
   function renderSetup() {
     const s = state.settings;
     const targeted = s.mode === 'targeted';
+    const warm = s.mode === 'warmup';
     $('#targeted-panel').hidden = !targeted;
+    $('#warmup-panel').hidden = !warm;
+    $('#duration-legend').textContent = warm ? 'Real round duration' : 'Duration';
+    $('#start-btn').textContent = warm ? 'Start warm-up' : 'Start';
     $$('[data-focus]').forEach((el) => { el.hidden = el.dataset.focus !== s.targeted.focus; });
     const ops = activeOps();
     // Subtraction uses the addition ranges and division the multiplication ranges.
@@ -211,14 +237,18 @@
     $('#start-btn').disabled = !!built.error;
 
     if (s.mode === 'targeted') renderTargetInfo(built);
+    if (warm) renderWarmupInfo(built);
 
     const pb = $('#setup-pb');
     if (built.config) {
-      const key = Z.settingsKey(built.config);
+      // Warm-ups have no score of their own; show the real round's record instead.
+      const cfg = warm ? buildRoundConfig('standard').config : built.config;
+      const key = Z.settingsKey(cfg);
       const best = Z.personalBest(state.sessions, key);
       const n = state.sessions.filter((x) => x.status === 'completed' && Z.settingsKey(x) === key).length;
-      pb.textContent = best ? `Personal best for these settings: ${best.score} (${plural(n, 'completed round')}).`
-        : 'No completed rounds with these exact settings yet.';
+      const what = warm ? 'Real round personal best' : 'Personal best for these settings';
+      pb.textContent = best ? `${what}: ${best.score} (${plural(n, 'completed round')}).`
+        : `No completed ${warm ? 'real ' : ''}rounds with these exact settings yet.`;
     } else {
       pb.textContent = '';
     }
@@ -262,6 +292,30 @@
     prev.innerHTML = html;
   }
 
+  const FEEDBACK_HINT = {
+    quiet: 'Quiet: just the phase name and a progress bar.',
+    pace: 'Pace: adds a dot that turns green when at least 2 of your last 3 answers beat your usual time for that operation.',
+    full: 'Full: the pace dot plus the timer and question count.',
+  };
+
+  const fmtClock = (sec) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`;
+
+  function renderWarmupInfo(built) {
+    const w = state.settings.warmup;
+    $('#feedback-hint').textContent = FEEDBACK_HINT[w.feedback];
+    if (!built.plan) { $('#warmup-summary').textContent = ''; $('#warmup-notice').innerHTML = ''; return; }
+    const parts = [`Total ${fmtClock(w.phases.reduce((a, b) => a + b, 0))}`];
+    if (w.phases[0]) {
+      const lab = Z.difficultyLabel(built.plan.phase1Ranges, built.config.ops);
+      parts.push('phase 1 uses ' + (lab.startsWith('Custom (') ? lab.slice(8, -1) : `${lab} ranges`));
+    }
+    if (built.plan.blocks.length) {
+      parts.push('phase 2: ' + built.plan.blocks.map((b) => `${Z.OP_SYMBOL[b.op]} ${Math.round(b.ms / 1000)} s`).join(', '));
+    }
+    $('#warmup-summary').textContent = parts.join(' · ') + '.';
+    $('#warmup-notice').innerHTML = built.plan.fallback && w.split === 'slower' ? `<p class="notice">${esc(built.plan.fallback)}</p>` : '';
+  }
+
   function onSetupChange() {
     readSetupForm();
     saveSettings();
@@ -270,19 +324,49 @@
 
   /* ---------------- game ---------------- */
 
-  function startRound() {
-    const built = buildRoundConfig();
+  function startRound(modeOverride) {
+    clearCountdown();
+    const built = buildRoundConfig(modeOverride);
     if (built.error) { show('setup'); return; }
     const c = built.config;
     const rng = Math.random;
-    const nextQuestion = c.mode === 'targeted'
-      ? () => built.plan.next(rng)
-      : () => Z.generateStandard(c.ranges, c.ops, rng);
-    state.round = new Z.Round(Object.assign({ id: Z.makeId(), startedAt: Date.now(), nextQuestion }, c));
-    state.roundMeta = { plan: built.plan || null, label: Z.settingsLabel(c) };
+    let nextQuestion;
+    if (c.mode === 'targeted') nextQuestion = () => built.plan.next(rng);
+    else if (c.mode === 'warmup') nextQuestion = (elapsed) => built.plan.next(elapsed, rng);
+    else nextQuestion = () => Z.generateStandard(c.ranges, c.ops, rng);
+    const extra = {};
+    if (c.mode === 'standard') {
+      const tag = Z.warmupTagFor(state.sessions, Date.now());
+      if (tag) extra.warmedUp = tag;
+    }
+    state.round = new Z.Round(Object.assign({ id: Z.makeId(), startedAt: Date.now(), nextQuestion }, c, extra));
+    state.roundMeta = {
+      plan: built.plan || null, label: Z.settingsLabel(c), mode: c.mode,
+      usual: c.mode === 'warmup' ? Z.opMedians(historyQuestions()) : null, pace: [],
+    };
 
     show('game');
-    $('#game-label').textContent = state.roundMeta.label + (built.plan && built.plan.fallback ? ' (random fallback: not enough history)' : '');
+    setGameView('play');
+    const warm = c.mode === 'warmup';
+    const feedback = warm ? c.warmup.feedback : 'full';
+    $('#warm-bar').hidden = !warm;
+    $('#clock-box').hidden = feedback !== 'full';
+    $('#score-box').hidden = feedback !== 'full';
+    $('#warm-pace').hidden = !warm || feedback === 'quiet';
+    $('#skip-btn').hidden = !warm;
+    $('#abandon-btn').textContent = warm ? 'Abandon warm-up (Esc)' : 'Abandon round (Esc)';
+    if (warm) {
+      $('#skip-btn').textContent = c.warmup.continue ? 'Skip to real round (Tab)' : 'End warm-up (Tab)';
+      const [b1, b2, total] = built.plan.bounds;
+      $('#warm-mark1').style.left = `${(b1 / total) * 100}%`;
+      $('#warm-mark1').hidden = !b1 || b1 >= total;
+      $('#warm-mark2').style.left = `${(b2 / total) * 100}%`;
+      $('#warm-mark2').hidden = b2 === b1 || b2 >= total;
+      $('#warm-phase').textContent = '';
+      updatePace();
+    }
+    $('#game-label').textContent = state.roundMeta.label +
+      (c.mode === 'targeted' && built.plan.fallback ? ' (random fallback: not enough history)' : '');
     $('#score').textContent = '0';
     $('#time-left').textContent = String(c.duration);
     const input = $('#answer');
@@ -307,6 +391,45 @@
     const secs = String(Math.ceil(r.remaining(now) / 1000));
     const el = $('#time-left');
     if (el.textContent !== secs) el.textContent = secs;
+    if (state.roundMeta.mode === 'warmup') updateWarmBar(now - r.startTime);
+  }
+
+  function updateWarmBar(elapsed) {
+    const plan = state.roundMeta.plan;
+    $('#warm-progress').style.width = `${Math.min(100, (elapsed / plan.total) * 100)}%`;
+    const p = plan.phaseAt(elapsed);
+    const label = p.phase === 1 ? 'Phase 1 · Easy fluency'
+      : p.phase === 2 ? `Phase 2 · ${Z.OP_SYMBOL[p.op]} ${Z.OP_NAME[p.op]}` : 'Phase 3 · Test conditions';
+    const el = $('#warm-phase');
+    if (el.textContent !== label) el.textContent = label;
+  }
+
+  // Pace: green when at least 2 of the last 3 answers beat your usual median for that operation.
+  function recordPace() {
+    const meta = state.roundMeta;
+    const recs = state.round.records;
+    const last = recs[recs.length - 1];
+    const usual = meta.usual[last.op];
+    if (usual) {
+      meta.pace.push(last.ms <= usual.median);
+      if (meta.pace.length > 3) meta.pace.shift();
+    }
+    updatePace();
+  }
+
+  function updatePace() {
+    const meta = state.roundMeta;
+    const el = $('#warm-pace');
+    let on = false;
+    let text;
+    if (!Object.keys(meta.usual || {}).length) text = 'Pace: no history yet';
+    else if (meta.pace.length < 3) text = 'Pace: settling in';
+    else {
+      on = meta.pace.filter(Boolean).length >= 2;
+      text = on ? 'On pace' : 'Building up';
+    }
+    el.classList.toggle('on', on);
+    $('.pace-text', el).textContent = text;
   }
 
   function onAnswerInput() {
@@ -318,6 +441,7 @@
       input.value = '';
       renderQuestion();
       $('#score').textContent = String(r.score);
+      if (state.roundMeta.mode === 'warmup') recordPace();
     } else if (res === 'expired') {
       endRound('completed');
     }
@@ -335,7 +459,49 @@
     const saved = persistSession(session);
     state.lastSession = session;
     state.lastSaved = saved;
-    if (reason !== 'pagehide') renderResults(session, saved);
+    if (reason === 'pagehide') return;
+    if (session.mode === 'warmup' && session.status === 'completed' && session.warmup.continue) startCountdown();
+    else renderResults(session, saved);
+  }
+
+  /* ---------------- countdown into the real round ---------------- */
+
+  function setGameView(view) {
+    const countdown = view === 'countdown';
+    $('#countdown').hidden = !countdown;
+    $('#problem-wrap').hidden = countdown;
+    $('.game-bar').hidden = countdown;
+    if (countdown) {
+      $('#warm-bar').hidden = true;
+      $('#skip-btn').hidden = true;
+      $('#abandon-btn').textContent = 'Cancel (Esc)';
+      $('#game-label').textContent = '';
+    }
+  }
+
+  function startCountdown() {
+    show('game');
+    setGameView('countdown');
+    const real = buildRoundConfig('standard');
+    $('#count-sub').textContent = real.config ? `Standard · ${Z.settingsLabel(real.config)}` : '';
+    let n = 3;
+    $('#count-n').textContent = String(n);
+    state.countdown = setInterval(() => {
+      n--;
+      if (n > 0) $('#count-n').textContent = String(n);
+      else startRound('standard');
+    }, 1000);
+  }
+
+  function clearCountdown() {
+    if (state.countdown) { clearInterval(state.countdown); state.countdown = null; }
+  }
+
+  // Esc during the countdown: stay on the warm-up's results instead.
+  function cancelCountdown() {
+    clearCountdown();
+    if (state.lastSession) renderResults(state.lastSession, state.lastSaved);
+    else show('setup');
   }
 
   /* ---------------- results ---------------- */
@@ -355,11 +521,21 @@
 
     $('#r-label').textContent = Z.settingsLabel(s) + ' · ' + fmtDate(s.startedAt);
     $('#r-score').textContent = s.score;
-    $('#r-status').textContent = s.status === 'abandoned' ? 'abandoned — excluded from records' : (s.score === 1 ? 'point' : 'points');
+    const warmRound = s.mode === 'warmup';
+    $('#r-status').textContent = s.status === 'abandoned' ? (warmRound ? 'abandoned warm-up' : 'abandoned — excluded from records')
+      : warmRound ? 'answered · warm-up, not counted in records' : (s.score === 1 ? 'point' : 'points');
+    if (!review) {
+      // Play again repeats the round type; after a warm-up the next step is the real round.
+      state.againMode = warmRound ? 'standard' : s.mode;
+      $('#again-btn').textContent = warmRound ? 'Start real round' : 'Play again';
+      $('#again-hint').innerHTML = warmRound ? 'Standard round · <kbd>Enter</kbd>' : 'Same settings · <kbd>Enter</kbd>';
+    }
 
     const prev = Z.personalBest(state.sessions, key, s.id);
     let pb = '';
-    if (review) {
+    if (warmRound) {
+      // Warm-ups have no personal bests.
+    } else if (review) {
       const best = Z.personalBest(state.sessions, key);
       pb = !best ? '' : (s.status === 'completed' && s.score >= best.score)
         ? '<span class="pb-new">Personal best for these settings.</span>' : `Personal best for these settings: ${best.score}`;
@@ -379,7 +555,10 @@
       sv.textContent = `✗ Not saved (${why}). Export a backup from Statistics before closing this tab.`;
     }
     const plan = !review && state.roundMeta && state.roundMeta.plan;
-    $('#r-note').textContent = plan && plan.fallback ? plan.fallback : '';
+    const notes = [];
+    if (plan && plan.fallback && (!warmRound || s.warmup.split === 'slower')) notes.push(plan.fallback);
+    if (s.warmedUp) notes.push(`Warmed up: started ${s.warmedUp.gapSec < 60 ? `${s.warmedUp.gapSec} s` : fmtClock(s.warmedUp.gapSec)} after a warm-up.`);
+    $('#r-note').textContent = notes.join(' ');
 
     const tiles = [
       ['Completed', String(completed.length), 'questions'],
@@ -483,6 +662,14 @@
       if (q.order === 1 || q.order % labelEvery === 0) svg += `<text x="${x + bw / 2}" y="${H - 12}" text-anchor="middle">${q.order}</text>`;
     });
     svg += `<line class="axis" x1="${L}" x2="${W - R}" y1="${base}" y2="${base}"/>`;
+    if (s.mode === 'warmup') {
+      qs.forEach((q, i) => {
+        if (!q.phase || (i > 0 && q.phase === qs[i - 1].phase)) return;
+        const x = L + i * slot;
+        if (i > 0) svg += `<line class="phase-line" x1="${x}" x2="${x}" y1="${T}" y2="${base}"/>`;
+        svg += `<text class="phase-label" x="${x + 4}" y="${T + 10}">Phase ${q.phase}</text>`;
+      });
+    }
     svg += `<line class="pb" x1="${L}" x2="${W - R}" y1="${y(eff.median)}" y2="${y(eff.median)}"/>` +
       `<text x="${W - R}" y="${y(eff.median) - 4}" text-anchor="end">median ${fmtS(eff.median)}</text>`;
     qs.forEach((q, i) => { svg += `<rect class="hit" data-i="${i}" x="${L + i * slot}" y="${T}" width="${slot}" height="${H - T - B}"/>`; });
@@ -576,7 +763,8 @@
   }
 
   function sessionPasses(s, f, ignoreSettings) {
-    if (f.mode !== 'all' && s.mode !== f.mode) return false;
+    // "all" means standard + targeted; warm-ups only appear under their own filter.
+    if (f.mode === 'all' ? s.mode === 'warmup' : s.mode !== f.mode) return false;
     if (!f.abandoned && s.status !== 'completed') return false;
     if (f.diff !== 'all' && s.difficulty !== f.diff) return false;
     if (f.from) { const t = new Date(f.from + 'T00:00:00').getTime(); if (s.startedAt < t) return false; }
@@ -673,6 +861,11 @@
   /* ----- score trend (only within one settings group) ----- */
 
   function renderTrend(el, sessions, f) {
+    if (f.mode === 'warmup') {
+      el.innerHTML = '<h2>Warm-ups</h2><p class="section-note">Warm-ups have no scores, personal bests or trends. ' +
+        'Their question timings are included below, and each one is listed in Session history.</p>';
+      return;
+    }
     if (f.settings === 'all') {
       const groups = new Map();
       sessions.filter((s) => s.status === 'completed').forEach((s) => {
@@ -705,7 +898,15 @@
     const scores = list.map((s) => s.score);
     const best = Math.max(...scores);
     const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
-    el.innerHTML = `<h2>Score trend</h2><p class="section-note">${esc(label)} · ${plural(list.length, 'completed round')} · best ${best} · average ${mean.toFixed(1)}</p>` +
+    let warmLine = '';
+    if (list[0].mode === 'standard') {
+      const wc = Z.warmColdComparison(sessions, f.settings);
+      warmLine = wc.warm.n >= 5 && wc.cold.n >= 5
+        ? `<p class="section-note">Warmed up: median score ${wc.warm.medianScore} (n=${wc.warm.n}), first 10 questions ${fmtS(wc.warm.first10Median)} median · ` +
+          `Cold: median score ${wc.cold.medianScore} (n=${wc.cold.n}), first 10 questions ${fmtS(wc.cold.first10Median)} median.</p>`
+        : `<p class="section-note">Warm vs cold comparison appears after 5 completed rounds of each (warmed up: ${wc.warm.n}, cold: ${wc.cold.n}).</p>`;
+    }
+    el.innerHTML = `<h2>Score trend</h2><p class="section-note">${esc(label)} · ${plural(list.length, 'completed round')} · best ${best} · average ${mean.toFixed(1)}</p>` + warmLine +
       (list.length < 2 ? '<p class="empty">Play at least two rounds with these settings to see a trend.</p>' : '<div class="chart-wrap" id="trend-wrap"></div>');
     if (list.length >= 2) drawTrend($('#trend-wrap'), list, best);
   }
@@ -737,7 +938,7 @@
         const i = Number(r.dataset.i);
         const s = list[i];
         const med = Z.summarize(Z.completedOf(s.questions).map((q) => q.ms)).median;
-        tip.innerHTML = `<b>${s.score}</b> · ${esc(fmtDate(s.startedAt))}<br>median ${fmtS(med)}`;
+        tip.innerHTML = `<b>${s.score}</b> · ${esc(fmtDate(s.startedAt))}<br>median ${fmtS(med)}${s.warmedUp ? ' · warmed up' : ''}`;
         tip.hidden = false;
         const box = wrap.getBoundingClientRect();
         const px = (x(i) / W) * box.width;
@@ -994,13 +1195,24 @@
     $('#setup-form').addEventListener('submit', (e) => { e.preventDefault(); if (!$('#start-btn').disabled) startRound(); });
 
     $('#answer').addEventListener('input', onAnswerInput);
-    $('#abandon-btn').addEventListener('click', () => endRound('abandoned'));
+    $('#abandon-btn').addEventListener('click', () => { if (state.countdown) cancelCountdown(); else endRound('abandoned'); });
+    $('#skip-btn').addEventListener('click', () => endRound('ended'));
     $('#screen-game').addEventListener('mousedown', (e) => {
       if (e.target.id !== 'abandon-btn') setTimeout(() => $('#answer').focus(), 0);
     });
 
     document.addEventListener('keydown', (e) => {
-      if (state.screen === 'game' && e.key === 'Escape') { e.preventDefault(); endRound('abandoned'); return; }
+      if (state.screen === 'game' && e.key === 'Escape') {
+        e.preventDefault();
+        if (state.countdown) cancelCountdown(); else endRound('abandoned');
+        return;
+      }
+      // Tab ends a warm-up early (and continues into the real round if that is switched on).
+      if (state.screen === 'game' && e.key === 'Tab' && state.round && state.roundMeta.mode === 'warmup') {
+        e.preventDefault();
+        endRound('ended');
+        return;
+      }
       if (state.screen === 'setup' && e.key === 'Enter' && !e.defaultPrevented) {
         const t = e.target;
         if (t.tagName === 'BUTTON' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.tagName === 'INPUT') return;
@@ -1017,9 +1229,12 @@
     });
     document.addEventListener('visibilitychange', tick);
     // Leaving mid-round: keep what was played, marked as abandoned.
-    window.addEventListener('pagehide', () => { if (state.round && state.round.state === 'running') endRound('pagehide'); });
+    window.addEventListener('pagehide', () => {
+      clearCountdown();
+      if (state.round && state.round.state === 'running') endRound('pagehide');
+    });
 
-    $('#again-btn').addEventListener('click', startRound);
+    $('#again-btn').addEventListener('click', () => startRound(state.againMode));
     $('#change-btn').addEventListener('click', () => show('setup'));
     $('#back-stats-btn').addEventListener('click', () => show('stats'));
     $$('.nav-btn').forEach((b) => b.addEventListener('click', () => show(b.dataset.nav)));

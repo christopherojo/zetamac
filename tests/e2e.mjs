@@ -87,7 +87,7 @@ async function waitFor(cdp, expr, timeout = 5000) {
 }
 
 async function key(cdp, k) {
-  const codes = { Enter: 13, Escape: 27, Backspace: 8 };
+  const codes = { Enter: 13, Escape: 27, Backspace: 8, Tab: 9 };
   if (codes[k]) {
     const base = { key: k, code: k, windowsVirtualKeyCode: codes[k], nativeVirtualKeyCode: codes[k] };
     await cdp.send('Input.dispatchKeyEvent', Object.assign({ type: 'rawKeyDown' }, base, k === 'Enter' ? { text: '\r' } : {}));
@@ -403,6 +403,110 @@ async function main() {
   await shot(cdp, '4-stats');
   await shot(cdp, '5-stats-mobile', 390, 844);
   await cdp.send('Emulation.clearDeviceMetricsOverride');
+  console.log('Warm-up');
+  const setVal = (sel, v) => cdp.evaluate(`(() => { const e = document.querySelector('${sel}'); e.value = '${v}'; e.dispatchEvent(new Event('change', {bubbles: true})); })()`);
+  const problemText = `document.querySelector('#problem').textContent`;
+  const answerCurrent = async () => { for (const d of String(await cdp.evaluate(currentAnswer))) await key(cdp, d); };
+  // Generator operands (a, b) behind a displayed problem.
+  const operands = (p) => {
+    const [l, op, r] = p.split(' ').map((x, i) => (i === 1 ? x : Number(x)));
+    return { op, a: op === '−' || op === '÷' ? r : l, b: op === '−' ? l - r : op === '÷' ? l / r : r };
+  };
+  await cdp.evaluate(`document.querySelector('[data-nav=setup]').click()`);
+  await cdp.evaluate(`document.querySelector('input[name=mode][value=warmup]').click()`);
+  check(await cdp.evaluate(`['#w-p1','#w-p2','#w-p3'].map(s => document.querySelector(s).value).join()`) === '30,60,30',
+    'warm-up phases default to 30 s / 60 s / 30 s');
+  check(await cdp.evaluate(`!document.querySelector('#w-continue').checked && document.querySelector('input[name=wsplit]:checked').value === 'even' && document.querySelector('input[name=wfeedback]:checked').value === 'pace'`),
+    '"Then start a real round" is off by default; split Even, feedback Pace');
+  check(/^Total 2:00 · phase 1 uses Easy ranges · phase 2: \+ 15 s, − 15 s, × 15 s, ÷ 15 s\.$/.test(await cdp.evaluate(`document.querySelector('#warmup-summary').textContent`)),
+    'summary shows 2:00 total, Easy phase 1 ranges for a Medium test, and the phase 2 split');
+  check(await cdp.evaluate(opsChecked) === 'add,sub,mul,div', 'warm-up uses the standard operation selection');
+  check(await cdp.evaluate(`document.querySelector('#start-btn').textContent === 'Start warm-up' && document.querySelector('#duration-legend').textContent === 'Real round duration'`),
+    'start button and duration label reflect warm-up mode');
+
+  await setVal('#w-p1', '15'); await setVal('#w-p2', '15'); await setVal('#w-p3', '15');
+  await cdp.evaluate(`document.querySelector('input[name=wfeedback][value=full]').click(); document.querySelector('#w-continue').click()`);
+  await cdp.evaluate(`document.querySelector('#start-btn').click()`);
+  await waitFor(cdp, `!document.querySelector('#screen-game').hidden && !document.querySelector('#warm-bar').hidden`);
+  check(await cdp.evaluate(`!document.querySelector('#clock-box').hidden && !document.querySelector('#warm-pace').hidden && document.querySelector('#skip-btn').textContent === 'Skip to real round (Tab)'`),
+    'Full feedback shows the timer, pace indicator and skip button');
+  await waitFor(cdp, `/^Phase 1/.test(document.querySelector('#warm-phase').textContent)`);
+  const p1 = [];
+  for (let i = 0; i < 12; i++) { p1.push(await cdp.evaluate(problemText)); await answerCurrent(); }
+  const easy = { '+': [60, 60], '−': [60, 60], '×': [12, 20], '÷': [12, 20] };
+  check(p1.every((p) => { const o = operands(p); return o.a <= easy[o.op][0] && o.b <= easy[o.op][1]; }),
+    `phase 1 questions use Easy ranges (${p1.slice(0, 6).join(', ')}, …)`);
+  check(/Pace: |On pace|Building up/.test(await cdp.evaluate(`document.querySelector('#warm-pace').textContent`)), 'pace indicator shows a state');
+
+  await waitFor(cdp, `/^Phase 2/.test(document.querySelector('#warm-phase').textContent)`, 20000);
+  await answerCurrent(); // may still be a phase 1 question
+  const label = await cdp.evaluate(`document.querySelector('#warm-phase').textContent`);
+  const p2 = [];
+  for (let i = 0; i < 3; i++) { p2.push(await cdp.evaluate(problemText)); await answerCurrent(); }
+  check(p2.every((p) => p.split(' ')[1] === label.split(' ')[3]), `phase 2 questions are one operation at a time (${label}: ${p2.join(', ')})`);
+
+  await key(cdp, 'Tab');
+  await waitFor(cdp, `!document.querySelector('#countdown').hidden`);
+  check(await cdp.evaluate(`document.querySelector('#count-n').textContent`) === '3', 'Tab skips to a 3-second countdown');
+  const cdStart = Date.now();
+  await waitFor(cdp, `document.querySelector('#countdown').hidden && !document.querySelector('#problem-wrap').hidden`, 6000);
+  const cdMs = Date.now() - cdStart;
+  check(cdMs > 2500 && cdMs < 4000, `real round starts after the countdown (${(cdMs / 1000).toFixed(1)} s)`);
+  check(await cdp.evaluate(`document.querySelector('#warm-bar').hidden && !document.querySelector('#clock-box').hidden && document.querySelector('#skip-btn').hidden && /^Medium · Bullet 60s/.test(document.querySelector('#game-label').textContent)`),
+    'the real round is a standard round with the standard settings');
+  await answerCurrent(); await answerCurrent();
+  await key(cdp, 'Escape');
+  await waitFor(cdp, `!document.querySelector('#screen-results').hidden`);
+  stored = await cdp.evaluate(storedSessions);
+  const wu = stored.filter((x) => x.m === 'warmup').sort((a, b) => b.t - a.t)[0];
+  check(wu && wu.st === 'completed' && wu.w.continue === true && wu.w.phases.join() === '15,15,15' && typeof wu.e === 'number',
+    'skipped warm-up saved as a completed warm-up with its settings and end time');
+  const phasesSeen = new Set(wu.q.map((row) => row[7]));
+  check(phasesSeen.has(1) && phasesSeen.has(2), 'warm-up questions record which phase they came from');
+  const real = stored.filter((x) => x.m === 'standard').sort((a, b) => b.t - a.t)[0];
+  check(real.wu && real.wu.warmupId === wu.id && real.wu.gapSec <= 5, `real round tagged as warmed up (${real.wu && real.wu.gapSec} s after)`);
+  check(await cdp.evaluate(`/Warmed up: started/.test(document.querySelector('#r-note').textContent)`), 'real round results mention the warm-up');
+
+  // Without auto-continue: the warm-up ends on its own results, offering the real round.
+  await cdp.evaluate(`document.querySelector('#change-btn').click()`);
+  check(await cdp.evaluate(`document.querySelector('input[name=mode]:checked').value`) === 'warmup', 'still in warm-up mode');
+  await cdp.evaluate(`document.querySelector('#w-continue').click()`);
+  await setVal('#w-p2', '0'); await setVal('#w-p3', '0');
+  check(/^Total 0:15/.test(await cdp.evaluate(`document.querySelector('#warmup-summary').textContent`)), 'phases set to Off are skipped (total 0:15)');
+  await cdp.evaluate(`document.querySelector('input[name=wfeedback][value=quiet]').click()`);
+  await cdp.evaluate(`document.querySelector('#start-btn').click()`);
+  await waitFor(cdp, `!document.querySelector('#screen-game').hidden`);
+  check(await cdp.evaluate(`document.querySelector('#clock-box').hidden && document.querySelector('#score-box').hidden && document.querySelector('#warm-pace').hidden && document.querySelector('#skip-btn').textContent === 'End warm-up (Tab)'`),
+    'Quiet feedback hides the timer, score and pace');
+  await answerCurrent(); await answerCurrent();
+  await waitFor(cdp, `!document.querySelector('#screen-results').hidden`, 20000);
+  check(await cdp.evaluate(`document.querySelector('#again-btn').textContent === 'Start real round' && /warm-up/.test(document.querySelector('#r-status').textContent) && document.querySelector('#r-pb').textContent === ''`),
+    'warm-up results offer "Start real round" and show no personal best');
+  check(await cdp.evaluate(`!!document.querySelector('#r-seq .phase-label')`), 'warm-up chart labels its phases');
+  await shot(cdp, '7-warmup-results');
+  await cdp.evaluate(`document.querySelector('#again-btn').click()`);
+  await waitFor(cdp, `!document.querySelector('#screen-game').hidden`);
+  check(await cdp.evaluate(`document.querySelector('#warm-bar').hidden && /^Medium · Bullet 60s/.test(document.querySelector('#game-label').textContent)`),
+    '"Start real round" starts a standard round');
+  await key(cdp, 'Escape');
+  await waitFor(cdp, `!document.querySelector('#screen-results').hidden`);
+
+  await cdp.evaluate(`document.querySelector('[data-nav=stats]').click()`);
+  await cdp.evaluate(`document.querySelector('#f-reset').click(); document.querySelector('#f-abandoned').click()`);
+  check(await cdp.evaluate(`[...document.querySelectorAll('#st-history tbody tr td:nth-child(2)')].every(td => td.textContent !== 'warmup')`),
+    'warm-ups are left out of the default statistics');
+  await setVal('#f-mode', 'warmup');
+  check(await cdp.evaluate(`[...document.querySelectorAll('#st-history tbody tr td:nth-child(2)')].map(td => td.textContent).join()`) === 'warmup,warmup',
+    'the Warm-ups filter lists exactly the two warm-ups');
+  check(await cdp.evaluate(`/Warm-ups have no scores/.test(document.querySelector('#st-trend').textContent)`), 'warm-ups have no score trend');
+  await setVal('#f-mode', 'all');
+
+  await cdp.evaluate(`document.querySelector('[data-nav=setup]').click(); document.querySelector('input[name=mode][value=warmup]').click()`);
+  await setVal('#w-p1', '30'); await setVal('#w-p2', '60'); await setVal('#w-p3', '30');
+  await shot(cdp, '8-warmup-setup');
+  await shot(cdp, '8b-warmup-setup-mobile', 390, 844);
+  if (SHOTS) await cdp.send('Emulation.clearDeviceMetricsOverride');
+
   const beforeFailure = (await cdp.evaluate(storedSessions)).length;
 
   console.log('Save failure is reported, not hidden');

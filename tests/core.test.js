@@ -442,3 +442,118 @@ test('after-slow effect compares the question after a slow one with the rest of 
   assert.deepEqual([streak.slowCount, streak.after.count, streak.after.median], [2, 2, 3000]);
   assert.equal(Z.afterSlowEffect([q(1, 500, 'unfinished')]), null);
 });
+
+/* ---------------- warm-up ---------------- */
+
+test('warm-up defaults: 30/60/30 s, one step easier, even split, pace feedback, no auto-continue', () => {
+  const d = Z.defaultSettings().warmup;
+  assert.deepEqual(d, { phases: [30, 60, 30], phase1: 'easier', split: 'even', feedback: 'pace', continue: false });
+  const s = Z.sanitizeSettings({ mode: 'warmup', warmup: { phases: [60, 60, 60], split: 'slower', feedback: 'quiet', continue: true } });
+  assert.equal(s.mode, 'warmup');
+  assert.deepEqual(s.warmup.phases, [60, 60, 60]);
+  assert.equal(s.warmup.continue, true);
+  assert.deepEqual(Z.sanitizeSettings({ warmup: { phases: [0, 0, 0] } }).warmup.phases, [30, 60, 30], 'all-off rejected');
+  assert.deepEqual(Z.sanitizeSettings({ warmup: { phases: [20, 60, 30] } }).warmup.phases, [30, 60, 30], 'must be 15 s steps');
+  assert.deepEqual(Z.sanitizeSettings({ warmup: { phases: [135, 60, 30] } }).warmup.phases, [30, 60, 30], 'max 2 min per phase');
+});
+
+test('phase 1 is one step easier than the test ranges', () => {
+  assert.deepEqual(Z.easierRanges(Z.PRESETS.hard), Z.PRESETS.medium);
+  assert.deepEqual(Z.easierRanges(Z.PRESETS.medium), Z.PRESETS.easy);
+  assert.deepEqual(Z.easierRanges(Z.PRESETS.easy), { add: [[2, 30], [2, 30]], mul: [[2, 12], [2, 10]] });
+  // Per family: Hard addition with Medium multiplication.
+  assert.deepEqual(Z.easierRanges({ add: Z.PRESETS.hard.add, mul: Z.PRESETS.medium.mul }), { add: Z.PRESETS.medium.add, mul: Z.PRESETS.easy.mul });
+  // Custom: halve addition and the second factor, never below the minimum.
+  assert.deepEqual(Z.easierRanges({ add: [[5, 9], [3, 3]], mul: [[3, 7], [4, 5]] }), { add: [[5, 5], [3, 3]], mul: [[3, 7], [4, 4]] });
+});
+
+test('warm-up plan: phases by elapsed time with the right ranges and operations', () => {
+  const plan = Z.buildWarmupPlan({ phases: [30, 60, 30], phase1: 'easier', split: 'even' }, Z.PRESETS.medium, Z.OPS, []);
+  assert.deepEqual(plan.bounds, [30000, 90000, 120000]);
+  assert.deepEqual(plan.blocks.map((b) => [b.op, b.ms]), [['add', 15000], ['sub', 15000], ['mul', 15000], ['div', 15000]]);
+  const r = rng(11);
+  const within = (q, ranges) => {
+    const [a, b] = Z.operandsOf(q);
+    const [r0, r1] = q.op === 'add' || q.op === 'sub' ? ranges.add : ranges.mul;
+    return a >= r0[0] && a <= r0[1] && b >= r1[0] && b <= r1[1];
+  };
+  const p1ops = new Set();
+  for (let i = 0; i < 3000; i++) {
+    const q1 = plan.next(29999 * r(), r);
+    p1ops.add(q1.op);
+    assert.equal(q1.phase, 1);
+    assert.ok(within(q1, Z.PRESETS.easy), 'phase 1 uses Easy ranges for a Medium test');
+    const q2 = plan.next(60000 + 14999 * r(), r); // third block (60–75 s): multiplication
+    assert.deepEqual([q2.phase, q2.op], [2, 'mul']);
+    assert.ok(within(q2, Z.PRESETS.medium));
+    const q3 = plan.next(90000 + 29999 * r(), r);
+    assert.equal(q3.phase, 3);
+    assert.ok(within(q3, Z.PRESETS.medium));
+  }
+  assert.equal(p1ops.size, 4, 'phase 1 mixes every selected operation');
+  // Skipped phases.
+  const only3 = Z.buildWarmupPlan({ phases: [0, 0, 60], phase1: 'easier', split: 'even' }, Z.PRESETS.medium, ['add'], []);
+  assert.equal(only3.phaseAt(0).phase, 3);
+  assert.deepEqual(only3.blocks, []);
+});
+
+test('phase 2 "favour slower" splits by median time with a 10 s floor, else falls back to even', () => {
+  const h = [];
+  for (let i = 0; i < 20; i++) h.push({ op: 'add', ms: 1000, status: 'completed' }, { op: 'mul', ms: 3000, status: 'completed' });
+  const w = Z.splitPhase2(['add', 'mul'], 60, 'slower', h);
+  assert.equal(w.weighted, true);
+  assert.deepEqual(w.blocks.map((b) => [b.op, b.ms]), [['add', 20000], ['mul', 40000]], '10 s each + 40 s shared 1:3');
+  const few = Z.splitPhase2(['add', 'mul', 'div'], 60, 'slower', h);
+  assert.equal(few.weighted, false);
+  assert.match(few.fallback, /÷ has 0/);
+  assert.deepEqual(few.blocks.map((b) => b.ms), [20000, 20000, 20000]);
+  const short = Z.splitPhase2(['add', 'mul'], 15, 'slower', h);
+  assert.match(short.fallback, /at least 20 s/);
+  assert.equal(Z.splitPhase2(['add', 'mul'], 60, 'even', h).fallback, null);
+});
+
+test('warm-up round: phases recorded per question; ending early keeps it as completed with an end time', () => {
+  const plan = Z.buildWarmupPlan({ phases: [15, 15, 15], phase1: 'easier', split: 'even' }, Z.PRESETS.medium, ['add'], []);
+  const r = rng(3);
+  const round = new Z.Round({ id: 'w1', startedAt: 1_700_000_000_000, mode: 'warmup', difficulty: 'medium',
+    ranges: Z.PRESETS.medium, ops: ['add'], duration: 45,
+    warmup: { phases: [15, 15, 15], phase1: 'easier', split: 'even', feedback: 'pace', continue: true,
+      phase1Ranges: plan.phase1Ranges, blocks: plan.blocks },
+    nextQuestion: (elapsed) => plan.next(elapsed, r) });
+  round.start(1000);
+  assert.equal(round.input(String(round.current.answer), 16500), 'correct'); // asked in phase 1, answered 15.5 s in
+  assert.equal(round.input(String(round.current.answer), 32000), 'correct'); // asked in phase 2, answered 31 s in
+  const s = round.finish(33000, 'ended');
+  assert.equal(s.status, 'completed');
+  assert.deepEqual(s.questions.map((q) => [q.phase, q.status]), [[1, 'completed'], [2, 'completed'], [3, 'unfinished']]);
+  assert.equal(s.questions[2].ms, 1000, 'unfinished time runs to when it was ended, not the deadline');
+  assert.equal(s.endedAt, 1_700_000_000_000 + 32000); // ended 32 s after the clock started
+  // Store round-trip keeps phases and warm-up settings.
+  const back = Z.fromStored(JSON.parse(JSON.stringify(Z.toStored(Z.validateSession(s)))));
+  assert.deepEqual(back, Z.validateSession(s));
+  assert.equal(back.warmup.continue, true);
+  assert.match(Z.settingsLabel(back), /^Warm-up · 0:45 \(15 \/ 15 \/ 15 s\)/);
+  assert.match(Z.settingsKey(back), /^warmup\|/);
+  assert.throws(() => Z.validateSession(Object.assign({}, s, { warmup: Object.assign({}, s.warmup, { phases: [0, 0, 0] }) })), /phases/);
+});
+
+test('standard rounds within 10 minutes of a completed warm-up are tagged; warm vs cold compares them', () => {
+  const t0 = 1_700_000_000_000;
+  const warm = (id, endedAt, status) => ({ id, mode: 'warmup', status: status || 'completed', endedAt });
+  const sessions = [warm('w-old', t0 - 3600e3), warm('w-new', t0 - 120e3), warm('w-abandoned', t0 - 10e3, 'abandoned')];
+  assert.deepEqual(Z.warmupTagFor(sessions, t0), { warmupId: 'w-new', gapSec: 120 });
+  assert.equal(Z.warmupTagFor(sessions, t0 + 9 * 60e3), null, 'over 10 minutes after the warm-up');
+  assert.equal(Z.warmupTagFor([], t0), null);
+
+  const base = { mode: 'standard', difficulty: 'medium', ranges: Z.PRESETS.medium, ops: Z.OPS, duration: 120, status: 'completed' };
+  const round = (id, score, firstMs, warmedUp) => Object.assign({ id, score, warmedUp,
+    questions: Array.from({ length: 12 }, (_, i) => ({ order: i + 1, op: 'add', left: 2, right: 2, answer: 4, ms: i < 10 ? firstMs : 9999, status: 'completed' })) }, base);
+  const list = [round('a', 50, 1500, { warmupId: 'w', gapSec: 5 }), round('b', 46, 1700, { warmupId: 'w', gapSec: 5 }),
+    round('c', 40, 2400), round('d', 44, 2000), round('e', 42, 2200)];
+  const wc = Z.warmColdComparison(list, Z.settingsKey(list[0]));
+  assert.deepEqual(wc.warm, { n: 2, medianScore: 48, first10Median: 1600 });
+  assert.deepEqual(wc.cold, { n: 3, medianScore: 42, first10Median: 2200 });
+  // Tag survives storage.
+  const s = Z.validateSession(Object.assign({}, list[0], { startedAt: t0, score: 12, questions: list[0].questions }));
+  assert.deepEqual(Z.fromStored(JSON.parse(JSON.stringify(Z.toStored(s)))).warmedUp, { warmupId: 'w', gapSec: 5 });
+});
